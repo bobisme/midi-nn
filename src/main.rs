@@ -1,5 +1,5 @@
-use std::fs::File;
 use std::io::prelude::*;
+use std::{cmp, fs::File};
 
 use midly::Smf;
 
@@ -14,7 +14,7 @@ pub mod notes;
 pub mod sequence;
 pub mod token;
 
-const MOONLIGHT: &[u8] = include_bytes!("1st Mvmt Sonata No.14, Opus 27, No.2.mid");
+const MOONLIGHT: &[u8] = include_bytes!("../beethopin.mid");
 
 fn main() -> color_eyre::Result<()> {
     let parsed = midi::parse(MOONLIGHT)?;
@@ -36,13 +36,13 @@ fn main() -> color_eyre::Result<()> {
     // dbg!(&token_map);
     // dbg!(token_map.len());
     let f = File::open("sample-0.tokens")?;
-    let sample: Vec<u32> = ciborium::from_reader(f)?;
+    let sample: Vec<(u32, f64)> = ciborium::from_reader(f)?;
     let mut smf = Smf::new(midly::Header {
         format: midly::Format::SingleTrack,
-        timing: midly::Timing::Metrical(1_000.into()),
+        timing: midly::Timing::Metrical(500.into()),
     });
     let mut track = midly::Track::new();
-    for token_idx in sample {
+    for (token_idx, beats) in sample {
         let token = token_map[&token_idx];
         // dbg!(token);
         let mut prev_note = 0u8;
@@ -61,9 +61,10 @@ fn main() -> color_eyre::Result<()> {
                     token::Level::High => 120,
                     token::Level::Max => 127,
                 };
-                let n = Note::from(note).with_vel(vel).with_beats(1.0);
+                let beats = if beats < 0.0 { 0.0 } else { beats };
+                let n = Note::from(note).with_vel(vel).with_beats(beats);
                 track.push(midly::TrackEvent {
-                    delta: 1000.into(),
+                    delta: 250.into(),
                     kind: midly::TrackEventKind::Midi {
                         channel: 0.into(),
                         message: midly::MidiMessage::NoteOff {
