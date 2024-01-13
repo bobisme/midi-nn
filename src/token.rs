@@ -42,14 +42,24 @@ impl From<u8> for Level {
     fn from(value: u8) -> Self {
         match value {
             0 => Self::Min,
-            x if x <= 25 => Self::Low,
-            x if x <= 50 => Self::LowMed,
-            x if x <= 75 => Self::Med,
-            x if x <= 100 => Self::MedHigh,
-            x if x < 127 => Self::High,
+            x if x <= 21 => Self::Low,
+            x if x <= 42 => Self::LowMed,
+            x if x <= 63 => Self::Med,
+            x if x <= 84 => Self::MedHigh,
+            x if x <= 105 => Self::High,
             _ => Self::Max,
         }
     }
+}
+
+/// Non-token parameters.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Params {
+    /// Beats this notes plays for.
+    pub duration: f64,
+    /// Beats until this note starts (from previous note).
+    /// Several notes with a delay of 0 means a chord.
+    pub delay: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -110,20 +120,25 @@ pub fn build_rev_map() -> HashMap<u32, Token> {
     rev_map
 }
 
-pub fn from_note(note: &Note) -> (Token, Beats) {
+pub fn from_note(note: &Note, delta: &Beats) -> (Token, Params) {
     let level: Level = note.vel().into();
     let token = Token::Note {
         note: note.note(),
         vel: level,
     };
-    (token, note.beats())
+    let params = Params {
+        duration: note.beats().into(),
+        delay: (*delta).into(),
+    };
+    (token, params)
 }
 
-pub fn embed_note(note: &Note) -> Vec<f64> {
-    let (tok, beats) = from_note(note);
+pub fn embed_note(note: &Note, delta: &Beats) -> Vec<f64> {
+    let (tok, params) = from_note(note, delta);
     let table = embed_table();
     let mut emb = table[tok.index() as usize].to_vec();
-    emb.push(beats.into());
+    emb.push(params.duration);
+    emb.push(params.delay);
     emb
 }
 
@@ -160,21 +175,23 @@ impl<'m> MidiTokenIter<'m> {
 }
 
 impl<'m> Iterator for MidiTokenIter<'m> {
-    type Item = (Token, Beats);
+    type Item = (Token, Params);
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.started {
             self.started = true;
-            return Some((Token::Start, Beats::zero()));
+            return Some((Token::Start, Params::default()));
         }
         let notes = self.midi.notes();
+        let deltas = &self.midi.deltas;
         if self.started && self.idx < notes.len() {
+            let i = self.idx;
             self.idx += 1;
-            return Some(from_note(&notes[self.idx - 1]));
+            return Some(from_note(&notes[i], &deltas[i]));
         }
         if !self.ended {
             self.ended = true;
-            return Some((Token::End, Beats::zero()));
+            return Some((Token::End, Params::default()));
         }
         None
     }

@@ -19,6 +19,7 @@ use crate::{
 pub struct Midi<'a> {
     smf: Smf<'a>,
     notes: Vec<Note>,
+    pub deltas: Vec<Beats>,
 }
 
 impl<'a> Midi<'a> {
@@ -111,6 +112,7 @@ pub fn parse(data: &[u8]) -> Result<Midi> {
     }
     let track = smf.tracks.get(0).unwrap();
     let mut notes = Vec::<Note>::new();
+    let mut deltas = Vec::<Beats>::new();
     let tempo = RefCell::new(25.0);
     let ticks_per_beat = || {
         let out = match smf.header.timing {
@@ -123,7 +125,9 @@ pub fn parse(data: &[u8]) -> Result<Midi> {
     //     midly::Timing::Metrical(x) => x.as_int() as f32,
     //     midly::Timing::Timecode(f, x) => f.as_f32() * x as f32 / (tempo / 60.0),
     // } as f64;
+    let mut cumulative_delta = 0;
     for (i, event) in track.iter().enumerate() {
+        cumulative_delta += event.delta.as_int();
         match event.kind {
             TrackEventKind::Midi { channel, message } => {
                 use MidiMessage::*;
@@ -139,6 +143,9 @@ pub fn parse(data: &[u8]) -> Result<Midi> {
                                 .with_vel(vel.as_int())
                                 .with_beats(Beats::from(off as f64 / ticks_per_beat())),
                         );
+                        let delta = Beats::from(cumulative_delta as f64 / ticks_per_beat());
+                        deltas.push(delta);
+                        cumulative_delta = 0;
                     }
                     Aftertouch { key: _, vel: _ } => {}
                     Controller {
@@ -162,7 +169,7 @@ pub fn parse(data: &[u8]) -> Result<Midi> {
             TrackEventKind::Meta(_) => {}
         }
     }
-    Ok(Midi { smf, notes })
+    Ok(Midi { smf, notes, deltas })
 }
 
 pub struct MidiSequence {
