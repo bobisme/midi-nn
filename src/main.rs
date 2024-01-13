@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::prelude::*;
+use std::process::Output;
 use std::{cmp, fs::File};
 
 use clap::{Arg, Parser, Subcommand};
@@ -23,7 +24,7 @@ struct Tokenize {
     /// Path to midi file.
     path: String,
     /// Path to output token file.
-    out_path: String,
+    out_path: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -31,7 +32,7 @@ struct Midify {
     /// Path to token file.
     path: String,
     /// Path to output midi file.
-    out_path: String,
+    out_path: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -65,8 +66,12 @@ fn main() -> color_eyre::Result<()> {
             let tokenized_track: Vec<(u32, f64, f64)> = iter
                 .map(|(t, p)| (t.index(), p.duration, p.delay))
                 .collect();
-            println!("writing to {}", &cmd.out_path);
-            ciborium::into_writer(&tokenized_track, File::create(&cmd.out_path)?)?;
+            let out_path = match &cmd.out_path {
+                Some(p) => p.clone(),
+                None => cmd.path.clone() + ".tokens",
+            };
+            println!("writing to {}", out_path);
+            ciborium::into_writer(&tokenized_track, File::create(&out_path)?)?;
         }
         Commands::Midify(cmd) => {
             let token_map = token::build_rev_map();
@@ -86,7 +91,6 @@ fn main() -> color_eyre::Result<()> {
                 kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(1_000_000.into())),
             });
             let mut current_tick = 0u32;
-            let mut cumulative_delta = 0;
             let mut active_notes: HashMap<u8, u32> = HashMap::new();
             for (token_idx, beats, delay) in sample {
                 let token = token_map[&token_idx];
@@ -149,8 +153,12 @@ fn main() -> color_eyre::Result<()> {
                 }
             }
             smf.tracks.push(track);
-            println!("writing to {}", &cmd.out_path);
-            smf.save(&cmd.out_path)?;
+            let out_path = match &cmd.out_path {
+                Some(p) => p.clone(),
+                None => cmd.path.clone() + ".mid",
+            };
+            println!("writing to {}", &out_path);
+            smf.save(&out_path)?;
         }
     }
     Ok(())
