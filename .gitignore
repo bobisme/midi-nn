@@ -2,5 +2,5 @@
 /runs
 .venv
 .ipynb_checkpoints
-*.tokens
-*.mid
+/*.tokens
+/*.mid
