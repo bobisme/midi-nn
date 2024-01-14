@@ -1,4 +1,6 @@
 /target
+/runs
 .venv
+.ipynb_checkpoints
 *.tokens
 *.mid
