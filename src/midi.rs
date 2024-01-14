@@ -18,7 +18,7 @@ use crate::{
 #[derive(Debug)]
 pub struct Midi<'a> {
     smf: Smf<'a>,
-    notes: Vec<Note>,
+    pub notes: Vec<Note>,
     pub deltas: Vec<Beats>,
 }
 

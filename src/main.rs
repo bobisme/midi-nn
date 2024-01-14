@@ -23,7 +23,11 @@ const MOONLIGHT: &[u8] = include_bytes!("../beethopin.mid");
 struct Tokenize {
     /// Path to midi file.
     path: String,
+    /// Transposition in semitones.
+    #[arg(long)]
+    transpose: Option<i8>,
     /// Path to output token file.
+    #[arg(long)]
     out_path: Option<String>,
 }
 
@@ -32,6 +36,7 @@ struct Midify {
     /// Path to token file.
     path: String,
     /// Path to output midi file.
+    #[arg(long)]
     out_path: Option<String>,
 }
 
@@ -61,14 +66,24 @@ fn main() -> color_eyre::Result<()> {
         Commands::Tokenize(cmd) => {
             println!("reading {}", &cmd.path);
             let midi_data = std::fs::read(&cmd.path)?;
-            let parsed = midi::parse(&midi_data)?;
+            let mut parsed = midi::parse(&midi_data)?;
+            let transpose = cmd.transpose.unwrap_or(0);
+            if transpose != 0 {
+                println!("transposing {:+} semitones", transpose);
+            }
+            let transposed_notes = parsed
+                .notes()
+                .iter()
+                .map(|x| x.transpose(transpose))
+                .collect();
+            parsed.notes = transposed_notes;
             let iter = tokenize_midi(&parsed);
             let tokenized_track: Vec<(u32, f64, f64)> = iter
                 .map(|(t, p)| (t.index(), p.duration, p.delay))
                 .collect();
             let out_path = match &cmd.out_path {
                 Some(p) => p.clone(),
-                None => cmd.path.clone() + ".tokens",
+                None => format!("{}.{transpose:+}-semis.tokens", cmd.path),
             };
             println!("writing to {}", out_path);
             ciborium::into_writer(&tokenized_track, File::create(&out_path)?)?;
@@ -80,7 +95,7 @@ fn main() -> color_eyre::Result<()> {
             println!("reading {}", &cmd.path);
             let f = File::open(&cmd.path)?;
             let sample: Vec<(u32, f64, f64)> = ciborium::from_reader(f)?;
-            let ticks_per_beat = 1000;
+            let ticks_per_beat = 1_000;
             let mut smf = Smf::new(midly::Header {
                 format: midly::Format::SingleTrack,
                 timing: midly::Timing::Metrical(ticks_per_beat.into()),
@@ -88,7 +103,7 @@ fn main() -> color_eyre::Result<()> {
             let mut track = midly::Track::new();
             track.push(midly::TrackEvent {
                 delta: 0.into(),
-                kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(1_000_000.into())),
+                kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(500_000.into())),
             });
             let mut current_tick = 0u32;
             let mut active_notes: HashMap<u8, u32> = HashMap::new();

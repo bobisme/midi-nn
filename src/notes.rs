@@ -1,4 +1,5 @@
 use std::{
+    cmp,
     convert::{Infallible, TryFrom},
     fmt::Display,
     num::ParseFloatError,
@@ -104,6 +105,16 @@ pub struct Note {
     vel: u8,
     // nanobeats
     beats: Beats,
+}
+
+impl Note {
+    pub fn transpose(&self, semis: i8) -> Self {
+        Self {
+            note: cmp::max(self.note as i8 + semis, 0) as u8,
+            vel: self.vel,
+            beats: self.beats,
+        }
+    }
 }
 
 // impl std::slice::Join<&str> for Note {
