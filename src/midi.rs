@@ -29,10 +29,9 @@ impl<'a> Midi<'a> {
 }
 
 fn calc_ticks_per_beat(timing: &Timing, tempo: f32) -> f64 {
-    use midly::Timing::*;
     match *timing {
-        Metrical(x) => x.as_int() as f64,
-        Timecode(f, x) => f.as_f32() as f64 * x as f64 / (tempo as f64 / 60.0),
+        midly::Timing::Metrical(x) => x.as_int() as f64,
+        midly::Timing::Timecode(f, x) => f.as_f32() as f64 * x as f64 / (tempo as f64 / 60.0),
     }
 }
 
@@ -42,75 +41,47 @@ where
 {
     use MidiMessage::*;
 
-    let delta: u32 = iter
+    let (end_i, _) = iter
         .by_ref()
-        .take_while(|TrackEvent { delta: _, kind }| {
-            use TrackEventKind::*;
-            match kind {
-                Midi {
-                    channel: _,
-                    message,
-                } => match *message {
-                    NoteOn { key: k, vel: _ } if k == key => false,
-                    NoteOff { key: k, vel: _ } if k == key => false,
-                    _ => true,
-                },
-                _ => true,
-            }
+        .enumerate()
+        .find(|(_, TrackEvent { delta: _, kind })| match kind {
+            TrackEventKind::Midi {
+                channel: _,
+                message,
+            } => match *message {
+                // NoteOn { key: k, vel: _ } if k == key => true,
+                NoteOff { key: k, vel: _ } if k == key => true,
+                _ => false,
+            },
+            _ => false,
         })
-        .map(|ev| ev.delta.as_int())
+        .unwrap();
+    let delta = iter
+        .by_ref()
+        .take(end_i + 1)
+        .map(|x| x.delta.as_int())
         .sum();
-    let off_delta = iter.next().map_or(0, |ev| ev.delta.as_int());
-    delta + off_delta
-    // iter.scan(0u32, |state, event| {
-    //             *state += event.delta.as_int();
-    //             match event {
-    //                 None => Some([None, None]),
-    //                 Some(_ev) => {
-    //                     let d = *state as f64;
-    //                     let tpb = calc_ticks_per_beat(&smf.header.timing, *tempo.borrow());
-    //                     let beats = d / tpb;
-    //                     let ticks = (beats * self.ticks_per_beat as f64).round() as u32;
-    //                     *state = 0;
-    //                     Some([Some(Event::wait(ticks)), event])
-    //                 }
-    //             }
-    // })
-
-    // if let Some(channel) = channel {
-    //     iter.find(|&e| match e.kind {
-    //         TrackEventKind::Midi {
-    //             channel: ch,
-    //             message: MidiMessage::NoteOn { key: k, vel: v },
-    //         } => ch == channel && k == key && v == 0,
-    //         TrackEventKind::Midi {
-    //             channel: ch,
-    //             message: MidiMessage::NoteOff { key: k, vel: _ },
-    //         } => ch == channel && k == key,
-    //         _ => false,
-    //     })
-    // } else {
-    //     iter.find(|&e| match e.kind {
-    //         TrackEventKind::Midi {
-    //             channel: _,
-    //             message: MidiMessage::NoteOn { key: k, vel: v },
-    //         } => k == key && v == 0,
-    //         TrackEventKind::Midi {
-    //             channel: _,
-    //             message: MidiMessage::NoteOff { key: k, vel: _ },
-    //         } => k == key,
-    //         _ => false,
-    //     })
-    // }
+    if delta <= 1 {
+        println!("WARNING: 0-len note: {:?}", key);
+    }
+    delta
 }
 
 pub fn parse(data: &[u8]) -> Result<Midi> {
     let smf = Smf::parse(data)?;
     ensure!(!smf.tracks.len().is_zero(), "no tracks found!");
-    for (i, track) in smf.tracks.iter().enumerate() {
-        println!("track: {}, events: {}", i, track.len());
+    // for (i, track) in smf.tracks.iter().enumerate() {
+    //     println!("track: {}, events: {}", i, track.len());
+    // }
+    // get first track with enough events
+    let mut track = smf.tracks.get(0).unwrap();
+    for i in 1..16 {
+        if track.len() > 100 {
+            println!("using track {}", i - 1);
+            break;
+        }
+        track = smf.tracks.get(i).unwrap();
     }
-    let track = smf.tracks.get(0).unwrap();
     let mut notes = Vec::<Note>::new();
     let mut deltas = Vec::<Beats>::new();
     let tempo = RefCell::new(25.0);
@@ -137,11 +108,15 @@ pub fn parse(data: &[u8]) -> Result<Midi> {
                     }
                     NoteOn { key: _, vel } if vel == 0 => {}
                     NoteOn { key, vel } => {
-                        let off = find_next_off_delta(track.iter().skip(i + 1), key, Some(channel));
+                        let off = find_next_off_delta(track.iter().skip(i), key, Some(channel));
+                        let beats = off as f64 / ticks_per_beat();
+                        // if beats <= 0.001 {
+                        //     continue;
+                        // }
                         notes.push(
                             Note::from(key.as_int())
                                 .with_vel(vel.as_int())
-                                .with_beats(Beats::from(off as f64 / ticks_per_beat())),
+                                .with_beats(Beats::from(beats)),
                         );
                         let delta = Beats::from(cumulative_delta as f64 / ticks_per_beat());
                         deltas.push(delta);

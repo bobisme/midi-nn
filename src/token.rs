@@ -60,6 +60,8 @@ pub struct Params {
     /// Beats until this note starts (from previous note).
     /// Several notes with a delay of 0 means a chord.
     pub delay: f64,
+    /// Velocity
+    pub vel: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -68,7 +70,7 @@ pub enum Token {
     Pad,
     Start,
     End,
-    Note { note: u8, vel: Level },
+    Note { note: u8 },
 }
 
 pub struct Vector([f32; VECTOR_SIZE]);
@@ -80,7 +82,7 @@ impl Token {
             Token::Pad => 1,
             Token::Start => 2,
             Token::End => 3,
-            Token::Note { note, vel } => *note as u32 * 7 + *vel as u32 + 3,
+            Token::Note { note } => *note as u32,
         }
     }
 
@@ -94,26 +96,13 @@ impl Token {
 
 pub fn build_rev_map() -> HashMap<u32, Token> {
     let mut rev_map = HashMap::new();
-    for i in 0..(128 * 7 + 4) {
+    for i in 0..128 {
         let token = match i {
             0 => Token::Unknown,
             1 => Token::Pad,
             2 => Token::Start,
             3 => Token::End,
-            _ => {
-                let note = ((i - 3) / 7) as u8;
-                let vel = match (i - 3) % 7 {
-                    0 => Level::Min,
-                    1 => Level::Low,
-                    2 => Level::LowMed,
-                    3 => Level::Med,
-                    4 => Level::MedHigh,
-                    5 => Level::High,
-                    6 => Level::Max,
-                    _ => Level::Min,
-                };
-                Token::Note { note, vel }
-            }
+            _ => Token::Note { note: i as u8 },
         };
         rev_map.insert(i, token);
     }
@@ -121,14 +110,11 @@ pub fn build_rev_map() -> HashMap<u32, Token> {
 }
 
 pub fn from_note(note: &Note, delta: &Beats) -> (Token, Params) {
-    let level: Level = note.vel().into();
-    let token = Token::Note {
-        note: note.note(),
-        vel: level,
-    };
+    let token = Token::Note { note: note.note() };
     let params = Params {
         duration: note.beats().into(),
         delay: (*delta).into(),
+        vel: note.vel() as f64 / 127.0,
     };
     (token, params)
 }

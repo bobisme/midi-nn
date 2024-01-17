@@ -38,6 +38,8 @@ struct Midify {
     /// Path to output midi file.
     #[arg(long)]
     out_path: Option<String>,
+    #[arg(long, default_value_t = 500_000)]
+    us_per_beat: u32,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -60,6 +62,12 @@ fn beats_to_ticks(ticks_per_beat: u16, beats: impl Into<f64>) -> u32 {
     (b * ticks_per_beat as f64) as u32
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ActiveNote {
+    start_tick: u32,
+    length_ticks: u32,
+}
+
 fn main() -> color_eyre::Result<()> {
     let args = Args::parse();
     match &args.cmd {
@@ -78,8 +86,8 @@ fn main() -> color_eyre::Result<()> {
                 .collect();
             parsed.notes = transposed_notes;
             let iter = tokenize_midi(&parsed);
-            let tokenized_track: Vec<(u32, f64, f64)> = iter
-                .map(|(t, p)| (t.index(), p.duration, p.delay))
+            let tokenized_track: Vec<(u32, f64, f64, f64)> = iter
+                .map(|(t, p)| (t.index(), p.duration, p.delay, p.vel))
                 .collect();
             let out_path = match &cmd.out_path {
                 Some(p) => p.clone(),
@@ -94,7 +102,7 @@ fn main() -> color_eyre::Result<()> {
             // dbg!(token_map.len());
             println!("reading {}", &cmd.path);
             let f = File::open(&cmd.path)?;
-            let sample: Vec<(u32, f64, f64)> = ciborium::from_reader(f)?;
+            let sample: Vec<(u32, f64, f64, f64)> = ciborium::from_reader(f)?;
             let ticks_per_beat = 1_000;
             let mut smf = Smf::new(midly::Header {
                 format: midly::Format::SingleTrack,
@@ -103,43 +111,43 @@ fn main() -> color_eyre::Result<()> {
             let mut track = midly::Track::new();
             track.push(midly::TrackEvent {
                 delta: 0.into(),
-                kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(500_000.into())),
+                kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(
+                    cmd.us_per_beat.into(),
+                )),
             });
             let mut current_tick = 0u32;
-            let mut active_notes: HashMap<u8, u32> = HashMap::new();
-            for (token_idx, beats, delay) in sample {
+            let mut active_notes: HashMap<u8, ActiveNote> = HashMap::new();
+            for (token_idx, beats, delay, vel) in sample {
+                dbg!(&active_notes);
+                // dbg!(current_tick);
+                let vel = vel * 1.25;
+                let vel = vel.clamp(0.0, 1.0);
+                let beats = beats.clamp(0.0, 64.0);
+                let delay = delay.clamp(0.0, 64.0);
                 let token = token_map[&token_idx];
                 let mut prev_note = 0u8;
                 match token {
-                    token::Token::Note { note, vel } => {
-                        let vel = match vel {
-                            token::Level::Min => 0,
-                            token::Level::Low => 21,
-                            token::Level::LowMed => 42,
-                            token::Level::Med => 63,
-                            token::Level::MedHigh => 84,
-                            token::Level::High => 105,
-                            token::Level::Max => 127,
-                        };
-                        let beats = if beats < 0.0 { 0.0 } else { beats };
-                        let delay = if delay < 0.0 { 0.0 } else { delay };
+                    token::Token::Note { note } => {
+                        let vel = (vel * 127.0) as u8;
                         let n = Note::from(note).with_vel(vel).with_beats(beats);
                         let mut to_remove = Vec::new();
-                        for (&n, &exp) in active_notes.iter() {
-                            if current_tick >= exp {
+                        for (&n, &active) in active_notes.iter() {
+                            if current_tick >= (active.start_tick + active.length_ticks) {
                                 to_remove.push(n);
                                 track.push(midly::TrackEvent {
                                     delta: 0.into(),
                                     kind: midly::TrackEventKind::Midi {
                                         channel: 0.into(),
                                         message: midly::MidiMessage::NoteOff {
-                                            key: prev_note.into(),
+                                            // key: prev_note.into(),
+                                            key: n.into(),
                                             vel: 0.into(),
                                         },
                                     },
                                 });
                             }
                         }
+                        // dbg!(&to_remove);
                         for n in to_remove {
                             active_notes.remove(&n);
                         }
@@ -157,7 +165,10 @@ fn main() -> color_eyre::Result<()> {
                         });
                         active_notes.insert(
                             n.note(),
-                            current_tick + beats_to_ticks(ticks_per_beat, beats),
+                            ActiveNote {
+                                start_tick: current_tick,
+                                length_ticks: beats_to_ticks(ticks_per_beat, beats),
+                            },
                         );
                         prev_note = n.note();
                     }
