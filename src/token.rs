@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Once};
 
-use color_eyre::Result;
+
 
 use crate::{
     midi::Midi,

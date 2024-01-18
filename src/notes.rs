@@ -1,8 +1,7 @@
 use std::{
     cmp,
-    convert::{Infallible, TryFrom},
+    convert::{TryFrom},
     fmt::Display,
-    num::ParseFloatError,
     time::Duration,
 };
 
@@ -17,7 +16,7 @@ use nom::{
     IResult,
 };
 
-use crate::error::{Error, Result};
+use crate::error::{Result};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Beats {
