@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Once};
+use std::{cmp, collections::HashMap, sync::Once};
 
 use midly::{num::u7, MetaMessage, MidiMessage, TrackEvent, TrackEventKind};
 
@@ -61,15 +61,11 @@ pub struct Params {
     pub delay: f32,
     /// Velocity
     pub vel: f32,
-    /// Tempo. -1 = not set, 0.0..1.0 => 1.0..300.0
-    pub tempo: f32,
-    /// Sustain. -1 = no change, 0.0 = off, 1.0 = on
-    pub sustain: f32,
 }
 
 impl Params {
-    pub fn to_array(self) -> [f32; 4] {
-        [self.delay, self.vel, self.tempo, self.sustain]
+    pub fn to_array(self) -> [f32; 2] {
+        [self.delay, self.vel]
     }
 }
 
@@ -82,16 +78,23 @@ pub enum Token {
     Control,
     NoteOn { note: u8 },
     NoteOff { note: u8 },
+    Sustain { on: bool },
+    Tempo { bpm: u16 },
 }
 
 pub struct Vector([f32; VECTOR_SIZE]);
 
 impl Token {
+    const MIN_TEMPO: u16 = 30;
     const NOTE_ON_START: u32 = 5;
     const NOTE_ON_END: u32 = Self::NOTE_ON_START + 127;
     const NOTE_OFF_START: u32 = Self::NOTE_ON_END + 1;
     const NOTE_OFF_END: u32 = Self::NOTE_OFF_START + 127;
-    const MAX_INDEX: u32 = Self::NOTE_OFF_END;
+    const SUSTAIN_START: u32 = Self::NOTE_OFF_END + 1;
+    const SUSTAIN_END: u32 = Self::SUSTAIN_START + 1;
+    const TEMPO_START: u32 = Self::SUSTAIN_END + 1;
+    const TEMPO_END: u32 = Self::TEMPO_START + 255;
+    const MAX_INDEX: u32 = Self::TEMPO_END;
 
     pub const fn index(&self) -> u32 {
         match self {
@@ -102,6 +105,12 @@ impl Token {
             Token::Control => 4,
             Token::NoteOn { note } => Self::NOTE_ON_START + (*note as u32),
             Token::NoteOff { note } => Self::NOTE_OFF_START + (*note as u32),
+            Token::Sustain { on: false } => Self::SUSTAIN_START,
+            Token::Sustain { on: true } => Self::SUSTAIN_END,
+            Token::Tempo { bpm: val } => {
+                let x = val.saturating_sub(Self::MIN_TEMPO) & 0xFF;
+                Self::TEMPO_START + x as u32
+            }
         }
     }
 
@@ -117,6 +126,11 @@ impl Token {
             },
             Self::NOTE_OFF_START..=Self::NOTE_OFF_END => Self::NoteOff {
                 note: (index - Self::NOTE_OFF_START) as u8,
+            },
+            Self::SUSTAIN_START => Self::Sustain { on: false },
+            Self::SUSTAIN_END => Self::Sustain { on: true },
+            Self::TEMPO_START..=Self::TEMPO_END => Self::Tempo {
+                bpm: (index.saturating_sub(Self::TEMPO_START)) as u16 + Self::MIN_TEMPO,
             },
             _ => Self::Unknown,
         }
@@ -139,6 +153,28 @@ const _: () = {
     assert!(Token::NOTE_OFF_END == 260);
 };
 
+pub const REV_MAP: [Token; Token::MAX_INDEX as usize + 1] = {
+    let mut arr = [Token::Unknown; Token::MAX_INDEX as usize + 1];
+    let mut i = 0;
+    while i <= Token::MAX_INDEX {
+        let token = Token::from_index(i);
+        arr[i as usize] = token;
+        i += 1;
+    }
+    arr
+};
+
+// Check the REV_MAP has no "Unknown" gaps.
+#[allow(clippy::assertions_on_constants)]
+const _: () = {
+    assert!(REV_MAP[0].index() == 0);
+    let mut i = 1;
+    while i < REV_MAP.len() {
+        assert!(REV_MAP[i].index() != 0);
+        i += 1;
+    }
+};
+
 pub fn build_rev_map() -> HashMap<u32, Token> {
     let mut rev_map = HashMap::new();
     for i in 0..=Token::MAX_INDEX {
@@ -153,8 +189,6 @@ pub fn from_note(note: &Note, delta: &Beats) -> (Token, Params) {
     let params = Params {
         delay: (*delta).into(),
         vel: note.vel() as f32 / 127.0,
-        tempo: todo!(),
-        sustain: todo!(),
     };
     (token, params)
 }
@@ -194,8 +228,6 @@ pub fn from_event(
                 Params {
                     delay: delta as f32 / tpb,
                     vel: vel.as_int() as f32 / 127.0,
-                    tempo: -1.0,
-                    sustain: -1.0,
                 },
             )),
             MidiMessage::NoteOn { key, vel: v } if v == vel_0 => Some((
@@ -203,8 +235,6 @@ pub fn from_event(
                 Params {
                     delay: delta as f32 / tpb,
                     vel: 0.0,
-                    tempo: -1.0,
-                    sustain: -1.0,
                 },
             )),
             MidiMessage::NoteOn { key, vel } => Some((
@@ -212,30 +242,28 @@ pub fn from_event(
                 Params {
                     delay: delta as f32 / tpb,
                     vel: vel.as_int() as f32 / 127.0,
-                    tempo: -1.0,
-                    sustain: -1.0,
                 },
             )),
             MidiMessage::Controller { controller, value } if controller.as_int() == 64 => Some((
-                Token::Control,
+                Token::Sustain {
+                    on: value.as_int() >= 64,
+                },
                 Params {
                     delay: delta as f32 / tpb,
                     vel: -1.0,
-                    tempo: -1.0,
-                    sustain: value.as_int() as f32 / 127.0,
                 },
             )),
             _ => None,
         },
         TrackEventKind::Meta(MetaMessage::Tempo(us_per_beat)) => {
-            let beats_per_minute = 60_000_000 as f32 / us_per_beat.as_int() as f32;
+            let beats_per_minute = (60_000_000 / us_per_beat.as_int()) as u16;
             Some((
-                Token::Control,
+                Token::Tempo {
+                    bpm: beats_per_minute,
+                },
                 Params {
                     delay: delta as f32 / tpb,
                     vel: -1.0,
-                    tempo: (beats_per_minute - MIN_TEMPO) / MAX_TEMPO,
-                    sustain: -1.0,
                 },
             ))
         }

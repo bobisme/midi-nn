@@ -7,7 +7,7 @@ use midly::{Smf, TrackEvent};
 use notes::Note;
 use token::tokenize_midi;
 
-use crate::token::Params;
+use crate::token::{Params, REV_MAP};
 
 pub mod error;
 pub mod midi;
@@ -16,6 +16,7 @@ pub mod sequence;
 pub mod token;
 
 const MOONLIGHT: &[u8] = include_bytes!("../beethopin.mid");
+const TOKEN_VERSION: u16 = 3;
 
 #[derive(Parser, Debug, Clone)]
 struct Tokenize {
@@ -92,7 +93,7 @@ fn get_best_track(smf: &midly::Smf) -> usize {
     i
 }
 
-pub type Encoded = (u32, f32, f32, f32, f32);
+pub type Encoded = (u32, f32, f32);
 
 fn main() -> color_eyre::Result<()> {
     let args = Args::parse();
@@ -120,25 +121,25 @@ fn main() -> color_eyre::Result<()> {
                 }
                 cumulative_delta = 0;
                 let (tok, p) = res.unwrap();
-                if matches!(tok, token::Token::Control) && p.tempo >= 0.0 {
-                    beats_per_minute = token::param_to_bpm(p.tempo);
+                if let token::Token::Tempo { bpm } = tok {
+                    beats_per_minute = bpm as f32;
                 }
-                tokenized_track.push((tok.index(), p.delay, p.vel, p.tempo, p.sustain));
+                tokenized_track.push((tok.index(), p.delay, p.vel));
             }
             let out_path = match &cmd.out_path {
                 Some(p) => p.clone(),
                 None => format!("{}.{transpose:+}-semis.tokens", cmd.path),
             };
             println!("writing to {}", out_path);
-            ciborium::into_writer(&tokenized_track, File::create(&out_path)?)?;
+            ciborium::into_writer(&(TOKEN_VERSION, &tokenized_track), File::create(&out_path)?)?;
         }
         Commands::Midify(cmd) => {
-            let token_map = token::build_rev_map();
             // dbg!(&token_map);
             // dbg!(token_map.len());
             println!("reading {}", &cmd.path);
             let f = File::open(&cmd.path)?;
-            let samples: Vec<Encoded> = ciborium::from_reader(f)?;
+            let (ver, samples): (u16, Vec<Encoded>) = ciborium::from_reader(f)?;
+            assert!(ver == TOKEN_VERSION);
             let ticks_per_beat = 1_000;
             let timing = midly::Timing::Metrical(ticks_per_beat.into());
             let mut smf = Smf::new(midly::Header {
@@ -158,18 +159,14 @@ fn main() -> color_eyre::Result<()> {
             });
             let mut current_tick = 0u32;
             let mut active_notes: HashMap<u8, ActiveNote> = HashMap::new();
-            for (sample_i, (token_idx, delay, vel, tempo, sustain)) in
-                samples.into_iter().enumerate()
-            {
+            for (sample_i, (token_idx, delay, vel)) in samples.into_iter().enumerate() {
                 // dbg!(&active_notes);
                 // dbg!(current_tick);
                 let vel = vel * 1.5;
                 let vel = vel.clamp(0.1, 1.0);
                 let delay = delay.clamp(0.0, 64.0);
-                let tempo = tempo.clamp(-1.0, 0.8);
-                let sustain = tempo.clamp(-1.0, 1.0);
                 let delta = (delay * ticks_per_beat as f32) as u32;
-                let token = token_map[&token_idx];
+                let token = REV_MAP[token_idx as usize];
                 match token {
                     token::Token::NoteOn { note } => {
                         let vel = (vel * 127.0) as u8;
@@ -201,30 +198,32 @@ fn main() -> color_eyre::Result<()> {
                     token::Token::Pad => {}
                     token::Token::Start => {}
                     token::Token::End => {}
-                    token::Token::Control => {
-                        if sustain >= 0.0 {
-                            track.push(midly::TrackEvent {
-                                delta: delta.into(),
-                                kind: midly::TrackEventKind::Midi {
-                                    channel: 0.into(),
-                                    message: midly::MidiMessage::Controller {
-                                        controller: 64.into(),
-                                        value: ((sustain * 127.0) as u8).into(),
-                                    },
+                    token::Token::Sustain { on } => {
+                        let val = match on {
+                            true => 127,
+                            false => 0,
+                        };
+                        track.push(midly::TrackEvent {
+                            delta: delta.into(),
+                            kind: midly::TrackEventKind::Midi {
+                                channel: 0.into(),
+                                message: midly::MidiMessage::Controller {
+                                    controller: 64.into(),
+                                    value: val.into(),
                                 },
-                            });
-                        }
-                        if tempo >= 0.0 {
-                            let bpm = token::param_to_bpm(tempo);
-                            let us_per_beat = (60_000_000.0 / bpm) as u32;
-                            track.push(midly::TrackEvent {
-                                delta: delta.into(),
-                                kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(
-                                    us_per_beat.into(),
-                                )),
-                            });
-                        }
+                            },
+                        });
                     }
+                    token::Token::Tempo { bpm } => {
+                        let us_per_beat = 60_000_000 / bpm as u32;
+                        track.push(midly::TrackEvent {
+                            delta: delta.into(),
+                            kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(
+                                us_per_beat.into(),
+                            )),
+                        });
+                    }
+                    token::Token::Control => {}
                 }
             }
             track.push(midly::TrackEvent {
@@ -254,15 +253,11 @@ fn main() -> color_eyre::Result<()> {
         Commands::InspectTokens(cmd) => {
             println!("reading {}", &cmd.path);
             let f = File::open(&cmd.path)?;
-            let samples: Vec<Encoded> = ciborium::from_reader(f)?;
-            for (idx, delay, vel, tempo, sustain) in samples {
+            let (v, samples): (u16, Vec<Encoded>) = ciborium::from_reader(f)?;
+            println!("TOKEN FORMAT {v}");
+            for (idx, delay, vel) in samples {
                 let tok = token::Token::from_index(idx);
-                let params = Params {
-                    delay,
-                    vel,
-                    tempo,
-                    sustain,
-                };
+                let params = Params { delay, vel };
                 println!("{:?} {:?}", tok, params);
             }
         }
