@@ -7,6 +7,8 @@ use midly::{Smf, TrackEvent};
 use notes::Note;
 use token::tokenize_midi;
 
+use crate::token::Params;
+
 pub mod error;
 pub mod midi;
 pub mod notes;
@@ -39,7 +41,13 @@ struct Midify {
 }
 
 #[derive(Parser, Debug, Clone)]
-struct Inspect {
+struct InspectMidi {
+    /// Path to midi file.
+    path: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct InspectTokens {
     /// Path to midi file.
     path: String,
 }
@@ -51,7 +59,9 @@ enum Commands {
     /// Convert a .token file to .midi
     Midify(Midify),
     /// Inspect a midi file.
-    Inspect(Inspect),
+    InspectMidi(InspectMidi),
+    /// Inspect a tokens file.
+    InspectTokens(InspectTokens),
 }
 
 #[derive(Parser, Debug)]
@@ -108,6 +118,7 @@ fn main() -> color_eyre::Result<()> {
                     cumulative_delta += ev.delta.as_int();
                     continue;
                 }
+                cumulative_delta = 0;
                 let (tok, p) = res.unwrap();
                 if matches!(tok, token::Token::Control) && p.tempo >= 0.0 {
                     beats_per_minute = token::param_to_bpm(p.tempo);
@@ -203,7 +214,6 @@ fn main() -> color_eyre::Result<()> {
                                 },
                             });
                         }
-                        // TODO: push tempo
                         if tempo >= 0.0 {
                             let bpm = token::param_to_bpm(tempo);
                             let us_per_beat = (60_000_000.0 / bpm) as u32;
@@ -229,7 +239,7 @@ fn main() -> color_eyre::Result<()> {
             println!("writing to {}", &out_path);
             smf.save(&out_path)?;
         }
-        Commands::Inspect(cmd) => {
+        Commands::InspectMidi(cmd) => {
             println!("reading {}", &cmd.path);
             let midi_data = std::fs::read(&cmd.path)?;
             let smf = Smf::parse(&midi_data)?;
@@ -239,6 +249,21 @@ fn main() -> color_eyre::Result<()> {
                 for ev in track {
                     println!("{:?}", ev);
                 }
+            }
+        }
+        Commands::InspectTokens(cmd) => {
+            println!("reading {}", &cmd.path);
+            let f = File::open(&cmd.path)?;
+            let samples: Vec<Encoded> = ciborium::from_reader(f)?;
+            for (idx, delay, vel, tempo, sustain) in samples {
+                let tok = token::Token::from_index(idx);
+                let params = Params {
+                    delay,
+                    vel,
+                    tempo,
+                    sustain,
+                };
+                println!("{:?} {:?}", tok, params);
             }
         }
     }

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Once};
 
-use midly::{MetaMessage, MidiMessage, TrackEvent, TrackEventKind};
+use midly::{num::u7, MetaMessage, MidiMessage, TrackEvent, TrackEventKind};
 
 use crate::{
     midi::Midi,
@@ -183,6 +183,7 @@ pub fn from_event(
 ) -> Option<(Token, Params)> {
     let tpb = ticks_per_beat(tempo_bpm, timing);
     let delta = ev.delta.as_int() + cumulative_delta;
+    let vel_0: u7 = u7::from(0);
     match ev.kind {
         TrackEventKind::Midi {
             channel: _,
@@ -193,6 +194,15 @@ pub fn from_event(
                 Params {
                     delay: delta as f32 / tpb,
                     vel: vel.as_int() as f32 / 127.0,
+                    tempo: -1.0,
+                    sustain: -1.0,
+                },
+            )),
+            MidiMessage::NoteOn { key, vel: v } if v == vel_0 => Some((
+                Token::NoteOff { note: key.into() },
+                Params {
+                    delay: delta as f32 / tpb,
+                    vel: 0.0,
                     tempo: -1.0,
                     sustain: -1.0,
                 },
