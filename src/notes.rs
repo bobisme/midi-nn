@@ -1,9 +1,4 @@
-use std::{
-    cmp,
-    convert::{TryFrom},
-    fmt::Display,
-    time::Duration,
-};
+use std::{cmp, convert::TryFrom, fmt::Display, time::Duration};
 
 use color_eyre::eyre::{bail, ensure, eyre};
 use nom::{
@@ -16,7 +11,7 @@ use nom::{
     IResult,
 };
 
-use crate::error::{Result};
+use crate::error::Result;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Beats {
@@ -80,6 +75,12 @@ impl PartialEq<Beats> for i64 {
 //     }
 // }
 
+impl From<f32> for Beats {
+    fn from(x: f32) -> Self {
+        Beats { inner: x as f64 }
+    }
+}
+
 impl From<f64> for Beats {
     fn from(x: f64) -> Self {
         Beats { inner: x }
@@ -89,6 +90,12 @@ impl From<f64> for Beats {
 impl From<i64> for Beats {
     fn from(x: i64) -> Self {
         Beats { inner: x as f64 }
+    }
+}
+
+impl From<Beats> for f32 {
+    fn from(b: Beats) -> Self {
+        b.inner as f32
     }
 }
 

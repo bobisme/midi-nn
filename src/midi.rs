@@ -41,21 +41,24 @@ where
 {
     use MidiMessage::*;
 
-    let (end_i, _) = iter
-        .by_ref()
-        .enumerate()
-        .find(|(_, TrackEvent { delta: _, kind })| match kind {
-            TrackEventKind::Midi {
-                channel: _,
-                message,
-            } => match *message {
-                // NoteOn { key: k, vel: _ } if k == key => true,
-                NoteOff { key: k, vel: _ } if k == key => true,
+    // let (end_i, _) = iter
+    let next_off =
+        iter.by_ref()
+            .enumerate()
+            .find(|(_, TrackEvent { delta: _, kind })| match kind {
+                TrackEventKind::Midi {
+                    channel: _,
+                    message,
+                } => match *message {
+                    // NoteOn { key: k, vel: _ } if k == key => true,
+                    NoteOff { key: k, vel: _ } if k == key => true,
+                    _ => false,
+                },
                 _ => false,
-            },
-            _ => false,
-        })
-        .unwrap();
+            });
+    let Some((end_i, _)) = next_off else {
+        return 0;
+    };
     let delta = iter
         .by_ref()
         .take(end_i + 1)
