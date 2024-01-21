@@ -72,6 +72,21 @@ struct Args {
     cmd: Commands,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct Header {
+    pub version: u16,
+    pub token_vocab_size: u16,
+}
+
+impl Default for Header {
+    fn default() -> Self {
+        Self {
+            version: TOKEN_VERSION,
+            token_vocab_size: token::REV_MAP.len() as u16,
+        }
+    }
+}
+
 fn beats_to_ticks(ticks_per_beat: u16, beats: impl Into<f64>) -> u32 {
     let b: f64 = beats.into();
     (b * ticks_per_beat as f64) as u32
@@ -131,15 +146,19 @@ fn main() -> color_eyre::Result<()> {
                 None => format!("{}.{transpose:+}-semis.tokens", cmd.path),
             };
             println!("writing to {}", out_path);
-            ciborium::into_writer(&(TOKEN_VERSION, &tokenized_track), File::create(&out_path)?)?;
+            ciborium::into_writer(
+                &(Header::default(), &tokenized_track),
+                File::create(&out_path)?,
+            )?;
         }
         Commands::Midify(cmd) => {
             // dbg!(&token_map);
             // dbg!(token_map.len());
             println!("reading {}", &cmd.path);
             let f = File::open(&cmd.path)?;
-            let (ver, samples): (u16, Vec<Encoded>) = ciborium::from_reader(f)?;
-            assert!(ver == TOKEN_VERSION);
+            // let (header, samples): (Header, Vec<Encoded>) = ciborium::from_reader(f)?;
+            let samples: Vec<Encoded> = ciborium::from_reader(f)?;
+            // assert!(header.version == TOKEN_VERSION);
             let ticks_per_beat = 1_000;
             let timing = midly::Timing::Metrical(ticks_per_beat.into());
             let mut smf = Smf::new(midly::Header {
@@ -253,8 +272,8 @@ fn main() -> color_eyre::Result<()> {
         Commands::InspectTokens(cmd) => {
             println!("reading {}", &cmd.path);
             let f = File::open(&cmd.path)?;
-            let (v, samples): (u16, Vec<Encoded>) = ciborium::from_reader(f)?;
-            println!("TOKEN FORMAT {v}");
+            let (header, samples): (Header, Vec<Encoded>) = ciborium::from_reader(f)?;
+            println!("TOKEN FORMAT {}", header.version);
             for (idx, delay, vel) in samples {
                 let tok = token::Token::from_index(idx);
                 let params = Params { delay, vel };
