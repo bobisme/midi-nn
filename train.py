@@ -1,13 +1,16 @@
 from contextlib import contextmanager
 import glob
 from pprint import pp
+import os.path
 import sys
 
 import cbor2
+from rich.progress import track
 import torch
 import matplotlib.pyplot as plt
 from torch.functional import Tensor
 from torch.utils.tensorboard.writer import SummaryWriter
+import torch.nn as nn
 
 from model import Model, ModelConfig
 
@@ -80,7 +83,7 @@ def get_optimizer(
 
 
 def train(
-    model: Model,
+    model: nn.DataParallel[Model],
     data,
     optimizer,
     scheduler,
@@ -90,9 +93,9 @@ def train(
     model.train()
     scaler = torch.cuda.amp.GradScaler()
     max_steps = 10_000
-    for i in range(max_steps + 1):
+    for i in track(range(max_steps + 1), description="Training"):
         global_training_steps += 1
-        Xb, Yb = get_batch(data, model.config)
+        Xb, Yb = get_batch(data, model.module.config)
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
             logits, loss, label_loss, added_param_loss = model(Xb, Yb)
@@ -121,7 +124,7 @@ def train(
     return max_steps, lossi[-1]
 
 
-def generate_samples(model: Model, sample_count=1):
+def generate_samples(model: Model, sample_count=1, max_new_tokens=2_000):
     n_added = model.config.n_added_params
     ctx_len = model.config.context_len
     # create context with padding + song start token
@@ -130,7 +133,8 @@ def generate_samples(model: Model, sample_count=1):
         device="cuda",
     )
     for sample in range(sample_count):
-        generated = model.generate(gen_ctx.clone(), max_new_tokens=1_000)
+        print(f"generating sample up to {max_new_tokens} tokens")
+        generated = model.generate(gen_ctx.clone(), max_new_tokens=max_new_tokens)
         with open(f"sample-{sample}.tokens", "wb") as f:
             cbor2.dump(generated, f)
             print("saved generated sample to", f.name)
@@ -153,17 +157,22 @@ def save(
 
 
 def main(args: list[str]):
-    resume = len(sys.argv) > 1 and sys.argv[1] == "resume"
-    generate = len(sys.argv) > 1 and sys.argv[1] == "generate"
+    resume = len(sys.argv) > 1 and args[1] == "resume"
+    generate = len(sys.argv) > 1 and args[1] == "generate"
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    track_paths = glob.glob("/home/bob/vmshare/midi/solo-piano/**/*.tokens")
+    glob_path = "~/vmshare/midi/solo-piano/**/*.tokens"
+    print(f"loading data from {glob_path}")
+    track_paths = glob.glob(os.path.expanduser(glob_path))
     tracks = []
+    token_vocab_size = 0
     for path in track_paths:
         with open(path, "rb") as f:
-            track_data: list[TrackElement] = cbor2.load(f)
+            header, track_data = cbor2.load(f)
+            assert header["version"] == 3, "unexpected token file format"
+            token_vocab_size = header["token_vocab_size"]
             if len(track_data) < 100:
                 print("too short:", path)
                 continue
@@ -175,7 +184,7 @@ def main(args: list[str]):
     train_data = data[:split_n]
     eval_data = data[split_n:]
 
-    config = ModelConfig()
+    config = ModelConfig(n_tokens=token_vocab_size)
     model = Model(config).cuda()
     summary.add_graph(model, get_batch(train_data, config))
 
@@ -185,23 +194,25 @@ def main(args: list[str]):
     estimate = estimate_loss(model, train_data, eval_data)
     pp(estimate)
 
-    optimizer = get_optimizer(model.named_parameters(), learning_rate=1e-3)
+    optimizer = get_optimizer(model.named_parameters(), learning_rate=1e-5)
     epoch_size = split_n // BATCH_SIZE
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 2 * epoch_size, gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 10 * epoch_size, gamma=0.1)
     global_training_steps = 0
     if resume or generate:
         print("loading from checkpoint.pt")
         checkpoint = torch.load("checkpoint.pt")
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # optimizer_state = checkpoint["optimizer_state_dict"]
+        # optimizer.load_state_dict(optimizer_state)
         global_training_steps = checkpoint["steps_trained"]
         if resume:
             model.train()
         if generate:
             model.eval()
     if not generate:
+        para_model = nn.DataParallel(model)
         steps_trained, loss = train(
-            model,
+            para_model,
             train_data,
             optimizer,
             scheduler,

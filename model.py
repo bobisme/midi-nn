@@ -1,14 +1,12 @@
 import math
-import random
 from dataclasses import dataclass
 
+from rich.progress import track
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 assert torch.cuda.is_available()
-# random.seed(42)
-# torch.manual_seed(42)
 
 
 @dataclass
@@ -17,8 +15,8 @@ class ModelConfig:
     n_layers: int = 12
     n_heads: int = 8
     n_embeds: int = 32
-    n_tokens: int = 261
-    n_added_params: int = 4
+    n_tokens: int = 519
+    n_added_params: int = 2
     dropout: float = 0.0
     bias: bool = True
 
@@ -191,7 +189,7 @@ class Model(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         self.eval()
         out = []
-        for _ in range(max_new_tokens):
+        for _ in track(range(max_new_tokens)):
             idx = idx[:, -self.config.context_len :]  # truncate context
             logits, _, _, _ = self(idx)
             # TODO: temperature and top-k
@@ -207,5 +205,6 @@ class Model(nn.Module):
                 (idx, next_idx.view(1, -1, 1 + self.config.n_added_params)), dim=1
             )
             if next_token.item() == 3:
+                print("track end before max new tokens")
                 break
         return out
