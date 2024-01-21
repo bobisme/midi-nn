@@ -157,19 +157,21 @@ def save(
 
 
 def main(args: list[str]):
-    resume = len(sys.argv) > 1 and args[1] == "resume"
-    generate = len(sys.argv) > 1 and args[1] == "generate"
+    resume = len(args) > 1 and args[1] == "resume"
+    generate = len(args) > 1 and args[1] == "generate"
+    if resume or generate:
+        track_paths = args[2:]
+    else:
+        track_paths = args[1:]
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    glob_path = "~/vmshare/midi/solo-piano/**/*.tokens"
-    print(f"loading data from {glob_path}")
-    track_paths = glob.glob(os.path.expanduser(glob_path))
     tracks = []
     token_vocab_size = 0
     for path in track_paths:
         with open(path, "rb") as f:
+            print(f"reading data from {f.name}")
             header, track_data = cbor2.load(f)
             assert header["version"] == 3, "unexpected token file format"
             token_vocab_size = header["token_vocab_size"]
