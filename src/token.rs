@@ -1,5 +1,6 @@
-use std::{cmp, collections::HashMap, sync::Once};
+use std::sync::Once;
 
+use const_panic::concat_assert;
 use midly::{num::u7, MetaMessage, MidiMessage, TrackEvent, TrackEventKind};
 
 use crate::{
@@ -7,9 +8,10 @@ use crate::{
     notes::{Beats, Note},
 };
 
-const VECTOR_SIZE: usize = 64;
-const MIN_TEMPO: f32 = 1.0;
-const MAX_TEMPO: f32 = 300.0;
+pub const VECTOR_SIZE: usize = 64;
+pub const MIN_TEMPO: f32 = 1.0;
+pub const MAX_TEMPO: f32 = 300.0;
+pub const BEAT_DIVISIONS: u32 = 120;
 
 pub fn parse_table(data: &[u8]) -> Vec<Vec<f32>> {
     ciborium::from_reader(data).unwrap()
@@ -56,16 +58,13 @@ impl From<u8> for Level {
 /// Non-token parameters.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Params {
-    /// Beats until this event happens (from previous event).
-    /// Several notes with a delay of 0 means a chord.
-    pub delay: f32,
     /// Velocity
     pub vel: f32,
 }
 
 impl Params {
-    pub fn to_array(self) -> [f32; 2] {
-        [self.delay, self.vel]
+    pub fn to_array(self) -> [f32; 1] {
+        [self.vel]
     }
 }
 
@@ -80,6 +79,7 @@ pub enum Token {
     NoteOff { note: u8 },
     Sustain { on: bool },
     Tempo { bpm: u16 },
+    Wait { divisions: u8 },
 }
 
 pub struct Vector([f32; VECTOR_SIZE]);
@@ -94,7 +94,9 @@ impl Token {
     const SUSTAIN_END: u32 = Self::SUSTAIN_START + 1;
     const TEMPO_START: u32 = Self::SUSTAIN_END + 1;
     const TEMPO_END: u32 = Self::TEMPO_START + 255;
-    const MAX_INDEX: u32 = Self::TEMPO_END;
+    const WAIT_START: u32 = Self::TEMPO_END + 1;
+    const WAIT_END: u32 = Self::WAIT_START + BEAT_DIVISIONS;
+    const MAX_INDEX: u32 = Self::WAIT_END;
 
     pub const fn index(&self) -> u32 {
         match self {
@@ -107,10 +109,11 @@ impl Token {
             Token::NoteOff { note } => Self::NOTE_OFF_START + (*note as u32),
             Token::Sustain { on: false } => Self::SUSTAIN_START,
             Token::Sustain { on: true } => Self::SUSTAIN_END,
-            Token::Tempo { bpm: val } => {
-                let x = val.saturating_sub(Self::MIN_TEMPO) & 0xFF;
+            Token::Tempo { bpm } => {
+                let x = bpm.saturating_sub(Self::MIN_TEMPO) & 0xFF;
                 Self::TEMPO_START + x as u32
             }
+            Token::Wait { divisions } => Self::WAIT_START + *divisions as u32,
         }
     }
 
@@ -132,6 +135,9 @@ impl Token {
             Self::TEMPO_START..=Self::TEMPO_END => Self::Tempo {
                 bpm: (index.saturating_sub(Self::TEMPO_START)) as u16 + Self::MIN_TEMPO,
             },
+            Self::WAIT_START..=Self::WAIT_END => Self::Wait {
+                divisions: (index - Self::WAIT_START) as u8,
+            },
             _ => Self::Unknown,
         }
     }
@@ -151,6 +157,7 @@ const _: () = {
     assert!(Token::NOTE_ON_END == 132);
     assert!(Token::NOTE_OFF_START == 133);
     assert!(Token::NOTE_OFF_END == 260);
+    concat_assert!(Token::MAX_INDEX == 639, "max index = ", Token::MAX_INDEX);
 };
 
 pub const REV_MAP: [Token; Token::MAX_INDEX as usize + 1] = {
@@ -175,19 +182,9 @@ const _: () = {
     }
 };
 
-pub fn build_rev_map() -> HashMap<u32, Token> {
-    let mut rev_map = HashMap::new();
-    for i in 0..=Token::MAX_INDEX {
-        let token = Token::from_index(i);
-        rev_map.insert(i, token);
-    }
-    rev_map
-}
-
-pub fn from_note(note: &Note, delta: &Beats) -> (Token, Params) {
+pub fn from_note(note: &Note, _delta: &Beats) -> (Token, Params) {
     let token = Token::NoteOn { note: note.note() };
     let params = Params {
-        delay: (*delta).into(),
         vel: note.vel() as f32 / 127.0,
     };
     (token, params)
@@ -214,11 +211,12 @@ pub fn from_event(
     tempo_bpm: f32,
     timing: &midly::Timing,
     cumulative_delta: u32,
-) -> Option<(Token, Params)> {
+) -> Vec<(Token, Params)> {
     let tpb = ticks_per_beat(tempo_bpm, timing);
     let delta = ev.delta.as_int() + cumulative_delta;
     let vel_0: u7 = u7::from(0);
-    match ev.kind {
+    let mut vec = Vec::new();
+    let end_token = match ev.kind {
         TrackEventKind::Midi {
             channel: _,
             message,
@@ -226,21 +224,15 @@ pub fn from_event(
             MidiMessage::NoteOff { key, vel } => Some((
                 Token::NoteOff { note: key.into() },
                 Params {
-                    delay: delta as f32 / tpb,
                     vel: vel.as_int() as f32 / 127.0,
                 },
             )),
-            MidiMessage::NoteOn { key, vel: v } if v == vel_0 => Some((
-                Token::NoteOff { note: key.into() },
-                Params {
-                    delay: delta as f32 / tpb,
-                    vel: 0.0,
-                },
-            )),
+            MidiMessage::NoteOn { key, vel: v } if v == vel_0 => {
+                Some((Token::NoteOff { note: key.into() }, Params { vel: 0.0 }))
+            }
             MidiMessage::NoteOn { key, vel } => Some((
                 Token::NoteOn { note: key.into() },
                 Params {
-                    delay: delta as f32 / tpb,
                     vel: vel.as_int() as f32 / 127.0,
                 },
             )),
@@ -248,10 +240,7 @@ pub fn from_event(
                 Token::Sustain {
                     on: value.as_int() >= 64,
                 },
-                Params {
-                    delay: delta as f32 / tpb,
-                    vel: -1.0,
-                },
+                Params { vel: -1.0 },
             )),
             _ => None,
         },
@@ -261,16 +250,41 @@ pub fn from_event(
                 Token::Tempo {
                     bpm: beats_per_minute,
                 },
-                Params {
-                    delay: delta as f32 / tpb,
-                    vel: -1.0,
-                },
+                Params { vel: -1.0 },
             ))
         }
         TrackEventKind::SysEx(_) => None,
         TrackEventKind::Escape(_) => None,
         TrackEventKind::Meta(_) => None,
+    };
+    let Some(end) = end_token else {
+        return vec![];
+    };
+    let beats = delta as f32 / tpb;
+    if beats <= 0.01 {
+        return vec![end];
     }
+    let divs = (beats * BEAT_DIVISIONS as f32) as u32;
+    let full_beats = divs / BEAT_DIVISIONS;
+    for _ in 0..full_beats {
+        vec.push((
+            Token::Wait {
+                divisions: BEAT_DIVISIONS as u8,
+            },
+            Params::default(),
+        ));
+    }
+    let remaining = divs % BEAT_DIVISIONS;
+    if remaining > 0 {
+        vec.push((
+            Token::Wait {
+                divisions: remaining as u8,
+            },
+            Params::default(),
+        ));
+    }
+    vec.push(end);
+    vec
 }
 
 pub fn embed_note(note: &Note, delta: &Beats) -> Vec<f32> {
