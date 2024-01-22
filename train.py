@@ -1,8 +1,7 @@
+import argparse
 from contextlib import contextmanager
-import glob
 from pprint import pp
-import os.path
-import sys
+import random
 
 import cbor2
 from rich.progress import track
@@ -14,8 +13,10 @@ import torch.nn as nn
 
 from model import Model, ModelConfig
 
+DEV = "cuda"
+
 BATCH_SIZE = 128
-RUN_KEY = "attention-v5"
+RUN_KEY = "token-v4-model-v7"
 summary = SummaryWriter(f"runs/{RUN_KEY}")
 
 TrackElement = tuple[int, float, float, float, float]
@@ -33,26 +34,40 @@ class ModelStats:
         return n_elements
 
 
-def get_batch(data: torch.Tensor, config: ModelConfig, batch_size=BATCH_SIZE):
+def get_batch(
+    data: torch.Tensor, config: ModelConfig, batch_size=BATCH_SIZE, transpose_rate=0.0
+):
     ix = torch.randint(len(data) - config.context_len, (batch_size,))
-    x = torch.stack([data[i : i + config.context_len] for i in ix])
-    y = torch.stack([data[i + 1 : i + config.context_len + 1] for i in ix])
-    return x.cuda(), y.cuda()
+    x_data = [data[i : i + config.context_len] for i in ix]
+    y_data = [data[i + 1 : i + config.context_len + 1] for i in ix]
+    roll = random.random()
+    if roll < transpose_rate:
+        semis = random.choice(range(-5, 7))
+        for x in x_data:
+            if 5 < x[0] < (5 + 2 * 127):
+                x[0] += semis
+    x_tensor = torch.stack(x_data)
+    y_tensor = torch.stack(y_data)
+    return x_tensor.to(DEV), y_tensor.to(DEV)
 
 
 @contextmanager
 def autocast_ctx():
-    dtype = (
-        torch.bfloat16
-        if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-        else torch.float16
-    )
-    with torch.amp.autocast(device_type="cuda", dtype=dtype):
+    if DEV == "cuda":
+        dtype = (
+            torch.bfloat16
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+            else torch.float16
+        )
+        with torch.amp.autocast(device_type="cuda", dtype=dtype):
+            yield
+    else:
         yield
 
 
 @torch.no_grad()
 def estimate_loss(model: Model, train_data: Tensor, eval_data: Tensor, eval_iters=10):
+    print("estimating loss")
     out = {}
     model.eval()
     d = {"train": train_data, "eval": eval_data}
@@ -91,21 +106,22 @@ def train(
 ) -> tuple[int, float]:
     lossi = []
     model.train()
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.grad_scaler.GradScaler()
     max_steps = 10_000
     for i in track(range(max_steps + 1), description="Training"):
         global_training_steps += 1
         Xb, Yb = get_batch(data, model.module.config)
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
-            logits, loss, label_loss, added_param_loss = model(Xb, Yb)
+            _, loss, label_loss, added_param_loss = model(Xb, Yb)
         if i % 10 == 0:
             summary.add_scalar("loss", loss.item(), global_training_steps)
             summary.add_scalar("label_loss", label_loss.item(), global_training_steps)
             summary.add_scalar(
                 "added_param_loss", added_param_loss.item(), global_training_steps
             )
-        scaler.scale(loss).backward()
+        scaled: Tensor = scaler.scale(loss)  # type: ignore
+        scaled.backward()
         scaler.step(optimizer)
         scaler.update()
         # loss.backward()
@@ -124,19 +140,29 @@ def train(
     return max_steps, lossi[-1]
 
 
-def generate_samples(model: Model, sample_count=1, max_new_tokens=2_000):
+@torch.no_grad()
+def generate_samples(
+    model: Model, args: argparse.Namespace, sample_count=1, max_new_tokens=2_000
+):
+    model.eval()
     n_added = model.config.n_added_params
     ctx_len = model.config.context_len
     # create context with padding + song start token
     gen_ctx = torch.tensor(
-        [[[1, *[0.0] * n_added]] * (ctx_len - 1) + [[2, *[0.0] * n_added]]],
-        device="cuda",
+        [[[1, *[0.0] * n_added, 0]] * (ctx_len - 1) + [[2, *[0.0] * n_added, 0]]],
+        device=DEV,
     )
     for sample in range(sample_count):
         print(f"generating sample up to {max_new_tokens} tokens")
-        generated = model.generate(gen_ctx.clone(), max_new_tokens=max_new_tokens)
+        generated = model.generate(
+            gen_ctx.clone(),
+            max_new_tokens=max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+        )
+        header = {"version": 4, "token_vocab_size": 0}
         with open(f"sample-{sample}.tokens", "wb") as f:
-            cbor2.dump(generated, f)
+            cbor2.dump((header, generated), f)  # type: ignore
             print("saved generated sample to", f.name)
 
 
@@ -156,62 +182,69 @@ def save(
     print(f"saved checkpoint to {filename} and checkpoint.pt")
 
 
-def main(args: list[str]):
-    resume = len(args) > 1 and args[1] == "resume"
-    generate = len(args) > 1 and args[1] == "generate"
-    if resume or generate:
-        track_paths = args[2:]
-    else:
-        track_paths = args[1:]
-
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
+def load_tracks(track_paths: list[str]):
     tracks = []
-    token_vocab_size = 0
     for path in track_paths:
         with open(path, "rb") as f:
             print(f"reading data from {f.name}")
-            header, track_data = cbor2.load(f)
-            assert header["version"] == 3, "unexpected token file format"
-            token_vocab_size = header["token_vocab_size"]
+            header, track_data = cbor2.load(f)  # type: ignore
+            assert header["version"] == 4, "unexpected token file format"
             if len(track_data) < 100:
                 print("too short:", path)
                 continue
+            for i, _ in enumerate(track_data):
+                track_data[i].append(int(128.0 * i / len(track_data)))
             tracks.append(track_data)
-    tracks = [t for t in tracks if t]
+    return [t for t in tracks if t]
+
+
+def main(args: argparse.Namespace):
+    if not (args.resume or args.generate or args.scratch):
+        print("WHAT MODE SHALL I RUN?")
+        exit(1)
+    checkpoint_file = args.checkpoint or "checkpoint.pt"
+    track_paths = args.files
+    tracks = load_tracks(track_paths)
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     data = torch.tensor([event for track in tracks for event in track])
     split_n = int(0.9 * len(data))
     train_data = data[:split_n]
     eval_data = data[split_n:]
 
-    config = ModelConfig(n_tokens=token_vocab_size)
-    model = Model(config).cuda()
-    summary.add_graph(model, get_batch(train_data, config))
+    config = ModelConfig()
+    model = Model(config).to(DEV)
+    if args.scratch or args.resume:
+        summary.add_graph(model, get_batch(train_data, config))
 
     stats = ModelStats(model)
     print(f"Model has {stats.num_parameters()} parameters.")
 
-    estimate = estimate_loss(model, train_data, eval_data)
-    pp(estimate)
+    if args.scratch:
+        estimate = estimate_loss(model, train_data, eval_data)
+        pp(estimate)
 
-    optimizer = get_optimizer(model.named_parameters(), learning_rate=1e-5)
-    epoch_size = split_n // BATCH_SIZE
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 10 * epoch_size, gamma=0.1)
     global_training_steps = 0
-    if resume or generate:
-        print("loading from checkpoint.pt")
-        checkpoint = torch.load("checkpoint.pt")
+    optimizer = None
+    scheduler = None
+    if not args.generate:
+        optimizer = get_optimizer(model.named_parameters(), learning_rate=1e-3)
+        epoch_size = split_n // BATCH_SIZE
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, 10 * epoch_size, gamma=0.1
+        )
+    if args.resume or args.generate:
+        print(f"LOADING from {checkpoint_file}")
+        checkpoint = torch.load(checkpoint_file)
         model.load_state_dict(checkpoint["model_state_dict"])
-        # optimizer_state = checkpoint["optimizer_state_dict"]
-        # optimizer.load_state_dict(optimizer_state)
-        global_training_steps = checkpoint["steps_trained"]
-        if resume:
-            model.train()
-        if generate:
-            model.eval()
-    if not generate:
+        if not args.generate:
+            optimizer_state = checkpoint["optimizer_state_dict"]
+            assert optimizer
+            optimizer.load_state_dict(optimizer_state)
+            global_training_steps = checkpoint["steps_trained"]
+    if not args.generate and (args.resume or args.scratch):
         para_model = nn.DataParallel(model)
         steps_trained, loss = train(
             para_model,
@@ -221,6 +254,7 @@ def main(args: list[str]):
             global_training_steps=global_training_steps,
         )
         global_training_steps += steps_trained
+        assert scheduler
         save(
             model,
             optimizer=optimizer,
@@ -228,8 +262,30 @@ def main(args: list[str]):
             learning_rate=scheduler.get_last_lr()[0],
             steps_trained=global_training_steps,
         )
-    generate_samples(model)
+    generate_samples(model, args)
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    parser = argparse.ArgumentParser(description="Train this thing.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Path to checkpoint for resuming training or generating",
+    )
+    parser.add_argument("--resume", action="store_true", help="Resume training")
+    parser.add_argument(
+        "--generate", action="store_true", help="Just generate a new sample."
+    )
+    parser.add_argument("--scratch", action="store_true", help="Train from scratch")
+    parser.add_argument(
+        "files",
+        metavar="FILE",
+        type=str,
+        nargs="*",
+        help="an integer for the accumulator",
+    )
+    parser.add_argument("--cpu", action="store_true", help="CPU instead of cuda")
+    parser.add_argument("--temperature", default=1.0)
+    parser.add_argument("--top-k", default=None)
+    args = parser.parse_args()
+    main(args)

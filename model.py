@@ -3,10 +3,9 @@ from dataclasses import dataclass
 
 from rich.progress import track
 import torch
+from torch.functional import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
-
-assert torch.cuda.is_available()
 
 
 @dataclass
@@ -15,8 +14,8 @@ class ModelConfig:
     n_layers: int = 12
     n_heads: int = 8
     n_embeds: int = 32
-    n_tokens: int = 519
-    n_added_params: int = 2
+    n_tokens: int = 640
+    n_added_params: int = 1
     dropout: float = 0.0
     bias: bool = True
 
@@ -45,7 +44,7 @@ class SelfAttention(nn.Module):
         )
 
     def forward(self, x):
-        B, T, C = x.shape
+        _, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
         v = self.value(x)
@@ -99,7 +98,6 @@ class FeedForward(nn.Module):
 class SABlock(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
-        head_size = config.n_embeds // config.n_heads
         self.sa = MultiHeadAttention(config)
         self.ffwd = FeedForward(config)
         self.ln1 = nn.LayerNorm(config.n_embeds)
@@ -119,6 +117,8 @@ class Model(nn.Module):
         self.position_embedding_table = nn.Embedding(
             config.context_len, config.n_embeds
         )
+        self.track_position_embedding_table = nn.Embedding(128, config.n_embeds)
+        self.added_param_embed = nn.Linear(config.n_added_params, config.n_embeds)
         self.drop = nn.Dropout(config.dropout)
         self.blocks = nn.Sequential(*[SABlock(config) for _ in range(config.n_layers)])
         self.layer_norm = nn.LayerNorm(config.n_embed_and_added, bias=config.bias)
@@ -126,12 +126,9 @@ class Model(nn.Module):
             config.n_embed_and_added, config.n_tokens_and_added, bias=False
         )
         # Tie weights
-        print(f"{self.token_embedding_table.weight.shape=}")
-        print(f"{self.lm_head.weight.shape=}")
         tie_weights = torch.nn.Parameter(
             self.lm_head.weight[: config.n_tokens, : config.n_embeds]
         )
-        print(f"{tie_weights.shape=}")
         self.token_embedding_table.weight = tie_weights
         self.apply(self._init_weights)
         # Scale the weights of residual layers at initialization by a factor of 1/√N
@@ -142,6 +139,18 @@ class Model(nn.Module):
                 torch.nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layers)
                 )
+
+    def _split_inputs(self, inputs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """\
+        Split into tokens, added params, track_position
+        """
+        B, T, _ = inputs.shape
+        tokens = inputs[:, :, 0].long()
+        added = inputs[:, :, 1 : 1 + self.config.n_added_params].view(
+            B, T, self.config.n_added_params
+        )
+        track_pos = inputs[:, :, -1].view(B, self.config.context_len).long()
+        return tokens, added, track_pos
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -155,15 +164,13 @@ class Model(nn.Module):
         device = x.device
         B, T, C = x.shape
         assert T <= self.config.context_len, T
-        tokens = x[:, :, 0].long()
-        added = x[:, :, 1:].view(
-            -1, self.config.context_len, self.config.n_added_params
-        )
+        tokens, added, track_pos = self._split_inputs(x)
+        arange = torch.arange(T, dtype=torch.long, device=device)
         tok_emb = self.token_embedding_table(tokens)
-        pos_emb = self.position_embedding_table(
-            torch.arange(T, dtype=torch.long, device=device)
-        )
-        x = tok_emb + pos_emb
+        pos_emb = self.position_embedding_table(arange)
+        track_pos_emb = self.track_position_embedding_table(track_pos)
+        added_emb = self.added_param_embed(added)
+        x = tok_emb + pos_emb + added_emb + track_pos_emb
         x = self.drop(x)
         x = self.blocks(x)
         x = torch.cat((x, added), dim=2)
@@ -174,11 +181,10 @@ class Model(nn.Module):
             return logits, None, None, None
         logits = self.lm_head(x)
         B, T, C = logits.shape
-        classes = targets[:, :, 0].long()
-        added_params = targets[:, :, 1:]
-        label_loss = F.cross_entropy(logits.view(B * T, C), classes.view(B * T))
+        t_tokens, t_added, _ = self._split_inputs(targets)
+        label_loss = F.cross_entropy(logits.view(B * T, C), t_tokens.view(B * T))
         sq_err = (
-            added_params[:, :, -self.config.n_added_params :]
+            t_added[:, :, -self.config.n_added_params :]
             - logits[:, :, -self.config.n_added_params :]
         ) ** 2
         added_param_loss = sq_err.mean(dim=1).mean(dim=0).sum()
@@ -189,20 +195,35 @@ class Model(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         self.eval()
         out = []
-        for _ in track(range(max_new_tokens)):
+        for i in track(range(max_new_tokens)):
             idx = idx[:, -self.config.context_len :]  # truncate context
             logits, _, _, _ = self(idx)
-            # TODO: temperature and top-k
-            probs = F.softmax(logits[:, -1, : self.config.n_tokens], dim=-1)
+
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                val, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < val[:, [-1]]] = -float("Inf")
+
+            probs = F.softmax(logits[:, : self.config.n_tokens], dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # B, 1
             token = next_token.int().item()
-            added_params = logits[:, -1, -self.config.n_added_params :].view(
+            added_params = logits[:, -self.config.n_added_params :].view(
                 1, self.config.n_added_params
             )
-            next_idx = torch.cat((next_token, added_params), dim=-1)  # B, 3
+            next_track_pos = torch.tensor([[int(128 * i / max_new_tokens)]]).to(
+                idx.device
+            )
+            next_idx = torch.cat((next_token, added_params, next_track_pos), dim=-1)
+            # print(f"{idx.shape=}")
+            # print(f"{next_idx.shape=}")
             out.append([token] + added_params.tolist()[0])
+
             idx = torch.cat(
-                (idx, next_idx.view(1, -1, 1 + self.config.n_added_params)), dim=1
+                (
+                    idx,
+                    next_idx.view(1, -1, 1 + self.config.n_added_params + 1),
+                ),
+                dim=1,
             )
             if next_token.item() == 3:
                 print("track end before max new tokens")
