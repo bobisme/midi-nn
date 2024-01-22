@@ -4,3 +4,8 @@
 .ipynb_checkpoints
 /*.tokens
 /*.mid
+/*.pt
+/*.pth
+/*.wav
+/plot.svg
+__pycache__
