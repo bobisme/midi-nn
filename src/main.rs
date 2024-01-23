@@ -16,14 +16,15 @@ const TOKEN_VERSION: u16 = 4;
 
 #[derive(Parser, Debug, Clone)]
 struct Tokenize {
-    /// Path to midi file.
-    path: String,
+    /// Paths to midi files.
+    #[arg(required = true)]
+    paths: Vec<String>,
     /// Transposition in semitones.
     #[arg(long)]
     transpose: Option<i8>,
     /// Path to output token file.
     #[arg(long)]
-    out_path: Option<String>,
+    out_dir: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -95,43 +96,47 @@ fn get_best_track(smf: &midly::Smf) -> usize {
 
 pub type Encoded = (u32, f32);
 fn tokenize(cmd: &Tokenize) -> color_eyre::Result<()> {
-    println!("reading {}", &cmd.path);
-    let midi_data = std::fs::read(&cmd.path)?;
-    let smf = Smf::parse(&midi_data)?;
-    // 500,000 us == 120 BPM
-    let mut beats_per_minute = 120.0;
-    let timing = smf.header.timing;
-    let mut cumulative_delta = 0;
-    let transpose = cmd.transpose.unwrap_or(0);
-    if transpose != 0 {
-        println!("NOT IMPLEMENTED: transposing {:+} semitones", transpose);
-    }
-    let track_i = get_best_track(&smf);
-    let track = &smf.tracks[track_i];
-    let mut tokenized_track = Vec::new();
-    for ev in track {
-        let res = token::from_event(ev, beats_per_minute, &timing, cumulative_delta);
-        if res.is_empty() {
-            cumulative_delta += ev.delta.as_int();
-            continue;
+    for path in &cmd.paths {
+        println!("reading {}", path);
+        let midi_data = std::fs::read(path)?;
+        let smf = Smf::parse(&midi_data)?;
+        // 500,000 us == 120 BPM
+        let mut beats_per_minute = 120.0;
+        let timing = smf.header.timing;
+        let mut cumulative_delta = 0;
+        let transpose = cmd.transpose.unwrap_or(0);
+        if transpose != 0 {
+            println!("NOT IMPLEMENTED: transposing {:+} semitones", transpose);
         }
-        cumulative_delta = 0;
-        for (tok, p) in res {
-            if let token::Token::Tempo { bpm } = tok {
-                beats_per_minute = bpm as f32;
+        let track_i = get_best_track(&smf);
+        let track = &smf.tracks[track_i];
+        let mut tokenized_track = Vec::new();
+        for ev in track {
+            let res = token::from_event(ev, beats_per_minute, &timing, cumulative_delta);
+            if res.is_empty() {
+                cumulative_delta += ev.delta.as_int();
+                continue;
             }
-            tokenized_track.push((tok.index(), p.vel));
+            cumulative_delta = 0;
+            for (tok, p) in res {
+                if let token::Token::Tempo { bpm } = tok {
+                    beats_per_minute = bpm as f32;
+                }
+                tokenized_track.push((tok.index(), p.vel));
+            }
         }
+        let out_dir = cmd.out_dir.clone().unwrap_or("tokenized".to_string());
+        let out_path = match transpose {
+            0 => format!("{out_dir}/{}.tokens", path),
+            _ => format!("{out_dir}/{}.{transpose:+}-semis.tokens", path),
+        };
+        let _ = std::fs::create_dir(out_dir);
+        println!("writing to {}", out_path);
+        ciborium::into_writer(
+            &(Header::default(), &tokenized_track),
+            File::create(&out_path)?,
+        )?;
     }
-    let out_path = match &cmd.out_path {
-        Some(p) => p.clone(),
-        None => format!("{}.{transpose:+}-semis.tokens", cmd.path),
-    };
-    println!("writing to {}", out_path);
-    ciborium::into_writer(
-        &(Header::default(), &tokenized_track),
-        File::create(&out_path)?,
-    )?;
     Ok(())
 }
 

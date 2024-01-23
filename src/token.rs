@@ -17,18 +17,7 @@ pub fn parse_table(data: &[u8]) -> Vec<Vec<f32>> {
     ciborium::from_reader(data).unwrap()
 }
 
-static mut EMBED_TABLE: Vec<Vec<f32>> = vec![];
 static INIT_EMBED_TABLE: Once = Once::new();
-
-fn embed_table() -> &'static Vec<Vec<f32>> {
-    unsafe {
-        INIT_EMBED_TABLE.call_once(|| {
-            const EMBED_TABLE_DATA: &[u8] = include_bytes!("../embed-table-900-64.cbor");
-            EMBED_TABLE = parse_table(EMBED_TABLE_DATA);
-        });
-        &EMBED_TABLE
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
@@ -287,84 +276,84 @@ pub fn from_event(
     vec
 }
 
-pub fn embed_note(note: &Note, delta: &Beats) -> Vec<f32> {
-    let (tok, params) = from_note(note, delta);
-    let table = embed_table();
-    let mut emb = table[tok.index() as usize].to_vec();
-    emb.extend(params.to_array());
-    emb
-}
+// pub fn embed_note(note: &Note, delta: &Beats) -> Vec<f32> {
+//     let (tok, params) = from_note(note, delta);
+//     let table = embed_table();
+//     let mut emb = table[tok.index() as usize].to_vec();
+//     emb.extend(params.to_array());
+//     emb
+// }
+//
+// pub struct TokenIter<Iter> {
+//     iter: Iter,
+// }
 
-pub struct TokenIter<Iter> {
-    iter: Iter,
-}
+// impl<Iter> Iterator for TokenIter<Iter>
+// where
+//     Iter: Iterator<Item = (Token, Beats)>,
+// {
+//     type Item = Vec<f32>;
+//
+//     fn next(&mut self) -> Option<Self::Item> {
+//         let (token, beats) = self.iter.next()?;
+//         let table = embed_table();
+//         let mut emb = table[token.index() as usize].to_vec();
+//         emb.push(beats.into());
+//         Some(emb)
+//     }
+// }
 
-impl<Iter> Iterator for TokenIter<Iter>
-where
-    Iter: Iterator<Item = (Token, Beats)>,
-{
-    type Item = Vec<f32>;
+// pub struct MidiTokenIter<'m> {
+//     started: bool,
+//     ended: bool,
+//     idx: usize,
+//     midi: &'m Midi<'m>,
+// }
+//
+// impl<'m> MidiTokenIter<'m> {
+//     pub fn embedded(self) -> TokenIter<Self> {
+//         TokenIter { iter: self }
+//     }
+// }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let (token, beats) = self.iter.next()?;
-        let table = embed_table();
-        let mut emb = table[token.index() as usize].to_vec();
-        emb.push(beats.into());
-        Some(emb)
-    }
-}
-
-pub struct MidiTokenIter<'m> {
-    started: bool,
-    ended: bool,
-    idx: usize,
-    midi: &'m Midi<'m>,
-}
-
-impl<'m> MidiTokenIter<'m> {
-    pub fn embedded(self) -> TokenIter<Self> {
-        TokenIter { iter: self }
-    }
-}
-
-impl<'m> Iterator for MidiTokenIter<'m> {
-    type Item = (Token, Params);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.started {
-            self.started = true;
-            return Some((Token::Start, Params::default()));
-        }
-        let notes = self.midi.notes();
-        let deltas = &self.midi.deltas;
-        if self.started && self.idx < notes.len() {
-            let i = self.idx;
-            self.idx += 1;
-            return Some(from_note(&notes[i], &deltas[i]));
-        }
-        if !self.ended {
-            self.ended = true;
-            return Some((Token::End, Params::default()));
-        }
-        None
-    }
-}
-
-pub fn tokenize_midi<'m>(midi: &'m Midi) -> MidiTokenIter<'m> {
-    MidiTokenIter {
-        started: false,
-        ended: false,
-        idx: 0,
-        midi,
-    }
-}
-
-pub fn embed_midi<'m>(midi: &'m Midi) -> TokenIter<MidiTokenIter<'m>> {
-    let inner = MidiTokenIter {
-        started: false,
-        ended: false,
-        idx: 0,
-        midi,
-    };
-    inner.embedded()
-}
+// impl<'m> Iterator for MidiTokenIter<'m> {
+//     type Item = (Token, Params);
+//
+//     fn next(&mut self) -> Option<Self::Item> {
+//         if !self.started {
+//             self.started = true;
+//             return Some((Token::Start, Params::default()));
+//         }
+//         let notes = self.midi.notes();
+//         let deltas = &self.midi.deltas;
+//         if self.started && self.idx < notes.len() {
+//             let i = self.idx;
+//             self.idx += 1;
+//             return Some(from_note(&notes[i], &deltas[i]));
+//         }
+//         if !self.ended {
+//             self.ended = true;
+//             return Some((Token::End, Params::default()));
+//         }
+//         None
+//     }
+// }
+//
+// pub fn tokenize_midi<'m>(midi: &'m Midi) -> MidiTokenIter<'m> {
+//     MidiTokenIter {
+//         started: false,
+//         ended: false,
+//         idx: 0,
+//         midi,
+//     }
+// }
+//
+// pub fn embed_midi<'m>(midi: &'m Midi) -> TokenIter<MidiTokenIter<'m>> {
+//     let inner = MidiTokenIter {
+//         started: false,
+//         ended: false,
+//         idx: 0,
+//         midi,
+//     };
+//     inner.embedded()
+// }
