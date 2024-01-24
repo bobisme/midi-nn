@@ -31,16 +31,17 @@ def build_dataset(track):
     X, Y = [], []
     for event in track:
         # print(w)
-        context: list[int] = [1] * CONTEXT_LENGTH
+        # context: list[int] = [[1, 0.0]] * CONTEXT_LENGTH
+        context = [1] * CONTEXT_LENGTH
         for token, beats in track[:100]:
             # ix = stoi[ch]
             X.append(context)
-            Y.append(token)
-            # Y.append(beats)
+            Y.append(torch.tensor([token, beats]))
             # print("".join(itos[i] for i in context), "-->", itos[ix])
-            context = context[1:] + [token]
+            context = context[1:] + [torch.tensor([token, beats])]
+            # context = context[1:] + [token]
             # context = context[1:] + [token, beats]
-            # print(context)
+            print(context)
     return torch.tensor(X).cuda(), torch.tensor(Y).cuda()
 #%%
 track = moonlight
@@ -50,6 +51,9 @@ Xtrain, Ytrain = build_dataset(track[: int(0.8 * len(track))])
 Xdev, Ydev = build_dataset(track[int(0.8 * len(track)) : int(0.9 * len(track))])
 Xtest, Ytest = build_dataset(track[int(0.9 * len(track)) :])
 
+#%%
+print(Xtrain[:, :, 0])
+
 #%% Modules
 
 class Embedding:
@@ -57,6 +61,8 @@ class Embedding:
         self.weight = torch.randn((num_embeddings, embeddings_dim), device="cuda")
 
     def __call__(self, IX):
+        print(IX.shape)
+        # self.out = self.weight[IX[:, :, 0]]
         self.out = self.weight[IX]
         return self.out
 
@@ -246,10 +252,10 @@ split_loss("train")
 split_loss("eval")
 #%%
 # sample
-for sample in range(20):
+for sample in range(1):
     out = []
     context = [1] * CONTEXT_LENGTH
-    for i in range(200):
+    for i in range(1000):
         logits = model(torch.tensor([context]))
         probs = F.softmax(logits, dim=1)
         ix = torch.multinomial(probs, num_samples=1).item()
@@ -262,3 +268,4 @@ for sample in range(20):
         print(out)
         cbor2.dump(out, f)
         print("wrote", f.name)
+# %%
