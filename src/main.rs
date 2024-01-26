@@ -1,7 +1,8 @@
-use std::fs::File;
+use std::{fs::File, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use midly::Smf;
+use rayon::prelude::*;
 
 use crate::token::{Params, REV_MAP};
 
@@ -18,13 +19,13 @@ const TOKEN_VERSION: u16 = 4;
 struct Tokenize {
     /// Paths to midi files.
     #[arg(required = true)]
-    paths: Vec<String>,
+    paths: Vec<PathBuf>,
     /// Transposition in semitones.
     #[arg(long)]
     transpose: Option<i8>,
     /// Path to output token file.
     #[arg(long)]
-    out_dir: Option<String>,
+    out_dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -96,10 +97,10 @@ fn get_best_track(smf: &midly::Smf) -> usize {
 
 pub type Encoded = (u32, f32);
 fn tokenize(cmd: &Tokenize) -> color_eyre::Result<()> {
-    for path in &cmd.paths {
-        println!("reading {}", path);
-        let midi_data = std::fs::read(path)?;
-        let smf = Smf::parse(&midi_data)?;
+    cmd.paths.par_iter().for_each(|path| {
+        println!("reading {:?}", path);
+        let midi_data = std::fs::read(path).unwrap();
+        let smf = Smf::parse(&midi_data).unwrap();
         // 500,000 us == 120 BPM
         let mut beats_per_minute = 120.0;
         let timing = smf.header.timing;
@@ -125,18 +126,22 @@ fn tokenize(cmd: &Tokenize) -> color_eyre::Result<()> {
                 tokenized_track.push((tok.index(), p.vel));
             }
         }
-        let out_dir = cmd.out_dir.clone().unwrap_or("tokenized".to_string());
-        let out_path = match transpose {
-            0 => format!("{out_dir}/{}.tokens", path),
-            _ => format!("{out_dir}/{}.{transpose:+}-semis.tokens", path),
-        };
-        let _ = std::fs::create_dir(out_dir);
-        println!("writing to {}", out_path);
+        let mut out_path = cmd.out_dir.clone().unwrap_or(PathBuf::from("tokenized"));
+        out_path.push(match transpose {
+            0 => format!("{}.tokens", path.file_name().unwrap().to_string_lossy()),
+            _ => format!(
+                "{}.{transpose:+}-semis.tokens",
+                path.file_name().unwrap().to_string_lossy()
+            ),
+        });
+        let _ = std::fs::create_dir(out_path.parent().unwrap());
+        println!("writing to {:?}", out_path);
         ciborium::into_writer(
             &(Header::default(), &tokenized_track),
-            File::create(&out_path)?,
-        )?;
-    }
+            File::create(&out_path).unwrap(),
+        )
+        .unwrap();
+    });
     Ok(())
 }
 
