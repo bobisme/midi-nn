@@ -2,6 +2,8 @@
 /runs
 .venv
 .ipynb_checkpoints
+/tokenized
+/wandb
 /*.tokens
 /*.mid
 /*.pt

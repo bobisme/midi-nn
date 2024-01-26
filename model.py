@@ -198,7 +198,6 @@ class Model(nn.Module):
         for i in track(range(max_new_tokens)):
             idx = idx[:, -self.config.context_len :]  # truncate context
             logits, _, _, _ = self(idx)
-
             logits = logits[:, -1, :]
             token_logits = logits[:, : self.config.n_tokens] / temperature
             if top_k is not None:
