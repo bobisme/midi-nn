@@ -38,17 +38,16 @@ def get_batch(
     data: torch.Tensor, config: ModelConfig, batch_size=BATCH_SIZE, transpose_rate=0.0
 ):
     ix = torch.randint(len(data) - config.context_len, (batch_size,))
-    x_data = [data[i : i + config.context_len] for i in ix]
-    y_data = [data[i + 1 : i + config.context_len + 1] for i in ix]
+    x_data = torch.stack([data[i : i + config.context_len] for i in ix]).to(DEV)
+    y_data = torch.stack([data[i + 1 : i + config.context_len + 1] for i in ix]).to(DEV)
     roll = random.random()
     if roll < transpose_rate:
         semis = random.choice(range(-5, 7))
-        for x in x_data:
-            if 5 < x[0] < (5 + 2 * 127):
-                x[0] += semis
-    x_tensor = torch.stack(x_data)
-    y_tensor = torch.stack(y_data)
-    return x_tensor.to(DEV), y_tensor.to(DEV)
+        tokens = x_data[:, :, 0]
+        x_data[:, :, 0] = torch.where(
+            (5 < tokens) & (tokens < (5 + 2 * 127)), tokens + semis, tokens
+        )
+    return x_data, y_data
 
 
 @contextmanager
@@ -104,13 +103,14 @@ def train(
     scheduler,
     global_training_steps=0,
 ) -> tuple[int, float]:
-    lossi = []
+    losses_log10 = []
+    losses = []
     model.train()
     scaler = torch.cuda.amp.grad_scaler.GradScaler()
-    max_steps = 10_000
+    max_steps = 20_000
     for i in track(range(max_steps + 1), description="Training"):
         global_training_steps += 1
-        Xb, Yb = get_batch(data, model.module.config)
+        Xb, Yb = get_batch(data, model.module.config, transpose_rate=0.8)
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
             _, loss, label_loss, added_param_loss = model(Xb, Yb)
@@ -124,26 +124,23 @@ def train(
         scaled.backward()
         scaler.step(optimizer)
         scaler.update()
-        # loss.backward()
-        # optimizer.step()
         # track
         scheduler.step()
+        losses_log10.append(loss.log10().item())
+        losses.append(loss.item())
         if i % 100 == 0:
-            print(
-                f"{i:7d}/{max_steps}: {loss.item():.4f}, LR={scheduler.get_last_lr()[0]}"
-            )
-        lossi.append(loss.log10().item())
+            mean = torch.tensor(losses[-100:]).mean().item()
+            last_lr = scheduler.get_last_lr()[0]
+            print(f"{i:7d}/{max_steps}: {mean:.4f}, LR={last_lr}")
     plt.figure(figsize=(16, 6))
-    r = (len(lossi) // 100) * 100
-    plt.plot(torch.tensor(lossi)[:r].view(-1, 100).mean(1))
+    r = (len(losses_log10) // 100) * 100
+    plt.plot(torch.tensor(losses_log10)[:r].view(-1, 100).mean(1))
     plt.savefig("plot.svg", format="svg")
-    return max_steps, lossi[-1]
+    return max_steps, losses_log10[-1]
 
 
 @torch.no_grad()
-def generate_samples(
-    model: Model, args: argparse.Namespace, sample_count=1, max_new_tokens=2_000
-):
+def generate_samples(model: Model, args: argparse.Namespace, sample_count=1):
     model.eval()
     n_added = model.config.n_added_params
     ctx_len = model.config.context_len
@@ -153,10 +150,10 @@ def generate_samples(
         device=DEV,
     )
     for sample in range(sample_count):
-        print(f"generating sample up to {max_new_tokens} tokens")
+        print(f"generating sample up to {args.max_new_tokens} tokens")
         generated = model.generate(
             gen_ctx.clone(),
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
         )
@@ -233,7 +230,7 @@ def main(args: argparse.Namespace):
         optimizer = get_optimizer(model.named_parameters(), learning_rate=1e-3)
         epoch_size = split_n // BATCH_SIZE
         scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, 10 * epoch_size, gamma=0.1
+            optimizer, 20 * epoch_size, gamma=0.1
         )
     if args.resume or args.generate:
         print(f"LOADING from {checkpoint_file}")
@@ -285,7 +282,8 @@ if __name__ == "__main__":
         help="an integer for the accumulator",
     )
     parser.add_argument("--cpu", action="store_true", help="CPU instead of cuda")
-    parser.add_argument("--temperature", default=1.0)
-    parser.add_argument("--top-k", default=None)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=2_000)
     args = parser.parse_args()
     main(args)

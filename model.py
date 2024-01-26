@@ -199,12 +199,13 @@ class Model(nn.Module):
             idx = idx[:, -self.config.context_len :]  # truncate context
             logits, _, _, _ = self(idx)
 
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :]
+            token_logits = logits[:, : self.config.n_tokens] / temperature
             if top_k is not None:
-                val, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < val[:, [-1]]] = -float("Inf")
+                val, _ = torch.topk(token_logits, min(top_k, token_logits.size(-1)))
+                token_logits[token_logits < val[:, [-1]]] = float("-inf")
 
-            probs = F.softmax(logits[:, : self.config.n_tokens], dim=-1)
+            probs = F.softmax(token_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # B, 1
             token = next_token.int().item()
             added_params = logits[:, -self.config.n_added_params :].view(
