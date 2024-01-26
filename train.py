@@ -16,7 +16,7 @@ from model import Model, ModelConfig
 DEV = "cuda"
 
 BATCH_SIZE = 128
-RUN_KEY = "token-v4-model-v7"
+RUN_KEY = "token-v4-model-v8"
 summary = SummaryWriter(f"runs/{RUN_KEY}")
 
 TrackElement = tuple[int, float, float, float, float]

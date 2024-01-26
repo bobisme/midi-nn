@@ -13,7 +13,7 @@ class ModelConfig:
     context_len: int = 512
     n_layers: int = 12
     n_heads: int = 8
-    n_embeds: int = 32
+    n_embeds: int = 64
     n_tokens: int = 640
     n_added_params: int = 1
     dropout: float = 0.0
@@ -86,7 +86,7 @@ class FeedForward(nn.Module):
         self.config = config
         self.net = nn.Sequential(
             nn.Linear(config.n_embeds, 4 * config.n_embeds),
-            nn.ReLU(),  # TODO: GELU
+            nn.GELU(),
             nn.Linear(4 * config.n_embeds, config.n_embeds),
             nn.Dropout(config.dropout),
         )

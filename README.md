@@ -24,9 +24,9 @@ Build a model capable of generating and endless piano sonata that's not obviousl
 
 ### Model
 
-| Version | Changes |
-| ------- | ------- |
-|         |         |
+| Version | Changes                           |
+| ------: | --------------------------------- |
+|       8 | Embed size 32 -> 64. ReLU -> GELU |
 
 ### Data
 
