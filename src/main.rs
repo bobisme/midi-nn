@@ -171,7 +171,7 @@ fn midify(cmd: &Midify) -> color_eyre::Result<()> {
     let mut delta = 0;
     for (token_idx, vel) in samples.into_iter() {
         let vel = vel * 1.5;
-        let vel = vel.clamp(0.1, 1.0);
+        let vel = vel.clamp(0.4, 1.0);
         let token = REV_MAP[token_idx as usize];
         match token {
             token::Token::Wait { divisions } => {
