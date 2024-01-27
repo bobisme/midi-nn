@@ -12,8 +12,6 @@ import torch.nn.functional as F
 class ModelConfig:
     context_len: int = 512
     n_layers: int = 12
-    n_heads: int = 8
-    n_embeds: int = 64
     n_heads: int = 6
     n_embeds: int = 192
     n_tokens: int = 640
@@ -127,6 +125,64 @@ class MultiHeadAttentionV2(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.projection(y))
         return y
+
+
+class SparseMultiHeadAttention(nn.Module):
+    def __init__(self, config: ModelConfig, flash=True):
+        super().__init__()
+        assert config.n_embeds % config.n_heads == 0
+        self.config = config
+        self.flash = flash
+        self.key = nn.Linear(config.n_embeds, config.n_embeds, bias=config.bias)
+        self.query = nn.Linear(config.n_embeds, config.n_embeds, bias=config.bias)
+        self.value = nn.Linear(config.n_embeds, config.n_embeds, bias=config.bias)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.projection = nn.Linear(config.n_embeds, config.n_embeds, bias=config.bias)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.out = nn.Linear(config.n_embeds, config.n_embeds, bias=config.bias)
+        self.register_buffer(
+            "tril", torch.tril(torch.ones(config.context_len, config.context_len))
+        )
+
+    def _attend(
+        self, shape: torch.Size, k: torch.Tensor, q: torch.Tensor, v: torch.Tensor
+    ) -> torch.Tensor:
+        B, T, C = shape
+        if self.flash:
+            dropout = self.config.dropout if self.training else 0.0
+            return F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, dropout_p=dropout, is_causal=True
+            )
+        w = q @ k.transpose(-2, -1) * C**-0.5
+        w = w.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        w = F.softmax(w, dim=-1)
+        w = self.dropout(w)
+        return w @ v
+
+    def forward(self, x):
+        B, T, C = x.shape
+        print(f"{x.shape=}")
+
+        n_heads = self.config.n_heads
+        head_size = self.config.n_embeds // n_heads
+        # Linear projections
+        key = self.key(x).view(B, T, n_heads, head_size).transpose(1, 2)
+        query = self.query(x).view(B, T, n_heads, head_size).transpose(1, 2)
+        value = self.value(x).view(B, T, n_heads, head_size).transpose(1, 2)
+
+        # Sparse Attention
+        outs = []
+        for i in range(self.config.n_heads):
+            start = i * head_size
+            end = (i + 1) * head_size
+            q = query[:, i, :, :]
+            k = key[:, i, start:end, :]
+            v = value[:, i, start:end, :]
+            w = q @ k.transpose(-2, -1) * C**-0.5
+            attn = torch.softmax(w, dim=-1)
+            outs.append(attn @ v)
+        outs = torch.cat(outs, dim=1).transpose(1, 2).contiguous().view(B, T, C)
+        return self.out(outs)
 
 
 class FeedForward(nn.Module):
