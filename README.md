@@ -24,10 +24,29 @@ Build a model capable of generating and endless piano sonata that's not obviousl
 
 ### Model
 
-| Version | Changes                           |
-| ------: | --------------------------------- |
-|       8 | Embed size 32 -> 64. ReLU -> GELU |
+| Version | Changes                                              |
+| ------: | ---------------------------------------------------- |
+|       9 | Embed size 64 -> 192. Combined multi head attention. |
+|       8 | Embed size 32 -> 64. ReLU -> GELU                    |
 
-### Data
+#### Notes
 
-- Implemented a probabilistic transposition system in the data loader.
+- Version 9
+  - Converges to a lower loss faster than v8.
+  - Uses less VRAM.
+- Version 8
+  - Lower loss faster than v7. Takes 2x the time for same iterations.
+  - Seems to prioritize wait tokens, so lots of dead space in generated samples.
+
+### Data Loader
+
+| Version | Changes                                   |
+| ------: | ----------------------------------------- |
+|       2 | Added probabilistic transposition system. |
+
+### To Try
+
+- [ ] Sparse Attention.
+- [ ] 384 embedding size.
+- [ ] Go back to continuous wait/delay.
+- [ ] Generate wait & velocity from the output of the attention block.
