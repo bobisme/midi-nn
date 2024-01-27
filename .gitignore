@@ -8,6 +8,8 @@
 /*.mid
 /*.pt
 /*.pth
+/*.pt.gz
+/*.pth.gz
 /*.wav
 /plot.svg
 __pycache__
