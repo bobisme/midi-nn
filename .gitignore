@@ -13,3 +13,5 @@
 /*.wav
 /plot.svg
 __pycache__
+.hypothesis
+/checkpoints
