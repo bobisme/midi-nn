@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 from model import ModelConfig, FeedForward, SelfAttention
@@ -9,7 +10,7 @@ def test_feed_forward_params():
     layers = list(ff.net.modules())
     assert isinstance(layers[1], nn.Linear)
     assert layers[1].weight.shape == (256, 64)
-    assert isinstance(layers[2], nn.ReLU)
+    assert isinstance(layers[2], nn.GELU)
     assert isinstance(layers[3], nn.Linear)
     assert layers[3].weight.shape == (64, 256)
     assert isinstance(layers[4], nn.Dropout)
@@ -24,14 +25,19 @@ def test_self_attention_params():
     assert sa.query.weight.shape == (16, 64)
     assert sa.value.weight.shape == (16, 64)
     assert sa.dropout.p == 0.13
-    tril = sa.get_buffer("tril")
-    assert tril.tolist() == [
-        [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
-        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-    ]
+    mask = sa.get_buffer("mask")
+    assert torch.equal(
+        mask,
+        torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            ]
+        ),
+    )
