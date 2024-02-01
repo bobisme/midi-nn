@@ -18,6 +18,7 @@ Build a model capable of generating and endless piano sonata that's not obviousl
 
 | Version | Changes                                                          |
 | ------: | ---------------------------------------------------------------- |
+|       5 | Back to continuous deltas.                                       |
 |       4 | Replace event deltas with "wait" tokens.                         |
 |       3 | Add Sustain Pedal and Tempo tokens. Add file header.             |
 |       2 | Replace Note token + Duration param with NoteOn, NoteOff tokens. |

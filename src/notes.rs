@@ -99,8 +99,20 @@ impl From<Beats> for f32 {
     }
 }
 
+impl From<&Beats> for f32 {
+    fn from(b: &Beats) -> Self {
+        b.inner as f32
+    }
+}
+
 impl From<Beats> for f64 {
     fn from(b: Beats) -> Self {
+        b.inner
+    }
+}
+
+impl From<&Beats> for f64 {
+    fn from(b: &Beats) -> Self {
         b.inner
     }
 }

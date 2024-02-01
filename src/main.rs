@@ -13,7 +13,7 @@ pub mod sequence;
 pub mod token;
 
 // const MOONLIGHT: &[u8] = include_bytes!("../beethopin.mid");
-const TOKEN_VERSION: u16 = 4;
+const TOKEN_VERSION: u16 = 5;
 
 #[derive(Parser, Debug, Clone)]
 struct Tokenize {
@@ -95,7 +95,8 @@ fn get_best_track(smf: &midly::Smf) -> usize {
     i
 }
 
-pub type Encoded = (u32, f32);
+pub type Encoded = (u32, f32, f32);
+
 fn tokenize(cmd: &Tokenize) -> color_eyre::Result<()> {
     cmd.paths.par_iter().for_each(|path| {
         println!("reading {:?}", path);
@@ -123,7 +124,7 @@ fn tokenize(cmd: &Tokenize) -> color_eyre::Result<()> {
                 if let token::Token::Tempo { bpm } = tok {
                     beats_per_minute = bpm as f32;
                 }
-                tokenized_track.push((tok.index(), p.vel));
+                tokenized_track.push((tok.index(), p.vel, p.delta));
             }
         }
         let mut out_path = cmd.out_dir.clone().unwrap_or(PathBuf::from("tokenized"));
@@ -168,16 +169,12 @@ fn midify(cmd: &Midify) -> color_eyre::Result<()> {
         delta: 0.into(),
         kind: midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(cmd.us_per_beat.into())),
     });
-    let mut delta = 0;
-    for (token_idx, vel) in samples.into_iter() {
+    for (token_idx, vel, beats) in samples.into_iter() {
         let vel = vel * 1.5;
         let vel = vel.clamp(0.4, 1.0);
         let token = REV_MAP[token_idx as usize];
+        let delta = (beats * ticks_per_beat as f32) as u32;
         match token {
-            token::Token::Wait { divisions } => {
-                let beats = divisions as f32 / token::BEAT_DIVISIONS as f32;
-                delta += (beats * ticks_per_beat as f32) as u32;
-            }
             token::Token::NoteOn { note } => {
                 let vel = (vel * 127.0) as u8;
                 track.push(midly::TrackEvent {
@@ -204,10 +201,6 @@ fn midify(cmd: &Midify) -> color_eyre::Result<()> {
                     },
                 });
             }
-            token::Token::Unknown => {}
-            token::Token::Pad => {}
-            token::Token::Start => {}
-            token::Token::End => {}
             token::Token::Sustain { on } => {
                 let val = match on {
                     true => 127,
@@ -233,10 +226,13 @@ fn midify(cmd: &Midify) -> color_eyre::Result<()> {
                     )),
                 });
             }
+            token::Token::Unknown => {
+                println!("WARNING: got unknown token");
+            }
+            token::Token::Pad => {}
+            token::Token::Start => {}
+            token::Token::End => {}
             token::Token::Control => {}
-        }
-        if !matches!(token, token::Token::Wait { divisions: _ }) {
-            delta = 0;
         }
     }
     track.push(midly::TrackEvent {
@@ -271,9 +267,9 @@ fn inspect_tokens(cmd: &InspectTokens) -> color_eyre::Result<()> {
     let f = File::open(&cmd.path)?;
     let (header, samples): (Header, Vec<Encoded>) = ciborium::from_reader(f)?;
     println!("TOKEN FORMAT {}", header.version);
-    for (idx, vel) in samples {
+    for (idx, vel, delta) in samples {
         let tok = token::Token::from_index(idx);
-        let params = Params { vel };
+        let params = Params { vel, delta };
         println!("{:?} {:?}", tok, params);
     }
     Ok(())
