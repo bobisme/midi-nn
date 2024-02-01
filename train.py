@@ -11,11 +11,10 @@ from torch.functional import Tensor
 from torch.utils.tensorboard.writer import SummaryWriter
 import torch.nn as nn
 
-from model import Model, ModelConfig
+from model import Model, ModelConfig, ModelForward
 
 DEV = "cuda"
 
-BATCH_SIZE = 128
 RUN_KEY = "token-v4-model-v9"
 summary = SummaryWriter(f"runs/{RUN_KEY}")
 
@@ -76,8 +75,8 @@ def estimate_loss(model: Model, train_data: Tensor, eval_data: Tensor, eval_iter
         for k in range(eval_iters):
             X, Y = get_batch(data, model.config)
             with autocast_ctx():
-                _, loss, _, _ = model(X, Y)
-            losses[k] = loss.item()
+                forward = model(X, Y)
+            losses[k] = forward.loss.item()
         out[split] = losses.mean()
     model.train()
     return out
@@ -113,21 +112,30 @@ def train(
         Xb, Yb = get_batch(data, model.module.config, transpose_rate=0.8)
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
-            _, loss, label_loss, added_param_loss = model(Xb, Yb)
+            forward: ModelForward = opts.model(Xb, Yb)
         if i % 10 == 0:
-            summary.add_scalar("loss", loss.item(), global_training_steps)
-            summary.add_scalar("label_loss", label_loss.item(), global_training_steps)
             summary.add_scalar(
-                "added_param_loss", added_param_loss.item(), global_training_steps
+                "learning_rate",
+                opts.scheduler.get_last_lr()[0],
+                opts.global_training_steps,
             )
-        scaled: Tensor = scaler.scale(loss)  # type: ignore
+            summary.add_scalar("loss", forward.loss.item(), opts.global_training_steps)
+            summary.add_scalar(
+                "token_loss", forward.token_loss.item(), opts.global_training_steps
+            )
+            summary.add_scalar(
+                "added_param_loss",
+                forward.added_loss.item(),
+                opts.global_training_steps,
+            )
+        scaled: Tensor = scaler.scale(forward.loss)  # type: ignore
         scaled.backward()
         scaler.step(optimizer)
         scaler.update()
         # track
         scheduler.step()
-        losses_log10.append(loss.log10().item())
-        losses.append(loss.item())
+        losses_log10.append(forward.loss.log10().item())
+        losses.append(forward.loss.item())
         if i % 100 == 0:
             mean = torch.tensor(losses[-100:]).mean().item()
             last_lr = scheduler.get_last_lr()[0]

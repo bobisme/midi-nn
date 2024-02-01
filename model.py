@@ -1,3 +1,4 @@
+from collections import namedtuple
 import math
 from dataclasses import dataclass
 
@@ -6,6 +7,8 @@ import torch
 from torch.functional import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+
+END_SONG_TOKEN = 3
 
 
 @dataclass
@@ -214,6 +217,11 @@ class SABlock(nn.Module):
         return x
 
 
+ModelForward = namedtuple(
+    "ModelForward", "token_logits added_logits loss token_loss added_loss"
+)
+
+
 class Model(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -265,7 +273,7 @@ class Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, x, targets=None):
+    def forward(self, x, targets=None) -> ModelForward:
         device = x.device
         B, T, C = x.shape
         assert T <= self.config.context_len, T
@@ -282,19 +290,22 @@ class Model(nn.Module):
         x = self.layer_norm(x)
         if targets is None:
             # only use last position for generation
-            logits = self.lm_head(x[:, [-1], :])
-            return logits, None, None, None
-        logits = self.lm_head(x)
-        B, T, C = logits.shape
+            token_logits = self.token_prediction(x[:, [-1], :])
+            added_logits = self.added_prediction(x[:, [-1], :])
+            return ModelForward(token_logits, added_logits, None, None, None)
+        token_logits = self.token_prediction(x)
+        added_logits = self.added_prediction(x)
+        B, T, C = token_logits.shape
         t_tokens, t_added, _ = self._split_inputs(targets)
-        label_loss = F.cross_entropy(logits.view(B * T, C), t_tokens.view(B * T))
-        sq_err = (
-            t_added[:, :, -self.config.n_added_params :]
-            - logits[:, :, -self.config.n_added_params :]
-        ) ** 2
-        added_param_loss = sq_err.mean(dim=1).mean(dim=0).sum()
-        loss = label_loss + added_param_loss
-        return logits, loss, label_loss, added_param_loss
+        token_loss = F.cross_entropy(token_logits.view(B * T, C), t_tokens.view(B * T))
+        err = added_logits - t_added
+        sq_err = err**2
+        mse = sq_err.mean(dim=1).mean(dim=0)
+        added_param_loss = mse.sum()
+        loss = token_loss + added_param_loss
+        return ModelForward(
+            token_logits, added_logits, loss, token_loss, added_param_loss
+        )
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
@@ -302,9 +313,8 @@ class Model(nn.Module):
         out = []
         for i in track(range(max_new_tokens)):
             idx = idx[:, -self.config.context_len :]  # truncate context
-            logits, _, _, _ = self(idx)
-            logits = logits[:, -1, :]
-            token_logits = logits[:, : self.config.n_tokens] / temperature
+            forward = self(idx)
+            token_logits = forward.token_logits[:, -1, :] / temperature
             if top_k is not None:
                 val, _ = torch.topk(token_logits, min(top_k, token_logits.size(-1)))
                 token_logits[token_logits < val[:, [-1]]] = float("-inf")
@@ -312,14 +322,10 @@ class Model(nn.Module):
             probs = F.softmax(token_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # B, 1
             token = next_token.int().item()
-            added_params = logits[:, -self.config.n_added_params :].view(
-                1, self.config.n_added_params
-            )
-            next_track_pos = torch.tensor([[int(128 * i / max_new_tokens)]]).to(
-                idx.device
-            )
-            next_idx = torch.cat((next_token, added_params, next_track_pos), dim=-1)
+            added_params = forward.added_logits[:, -1, :]
+            next_track_pos = torch.tensor([[i / max_new_tokens]]).to(idx.device)
             # print(f"{idx.shape=}")
+            next_idx = torch.cat((next_token, added_params, next_track_pos), dim=-1)
             # print(f"{next_idx.shape=}")
             out.append([token] + added_params.tolist()[0])
 
@@ -330,7 +336,7 @@ class Model(nn.Module):
                 ),
                 dim=1,
             )
-            if next_token.item() == 3:
+            if next_token.item() == END_SONG_TOKEN:
                 print("track end before max new tokens")
                 break
         return out
