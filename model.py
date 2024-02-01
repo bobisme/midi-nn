@@ -14,13 +14,14 @@ END_SONG_TOKEN = 3
 @dataclass
 class ModelConfig:
     context_len: int = 512
-    n_layers: int = 12
+    n_layers: int = 128
     n_heads: int = 6
-    n_embeds: int = 192
-    n_tokens: int = 640
-    n_added_params: int = 1
+    n_embeds: int = 384
+    n_tokens: int = 519
+    n_added_params: int = 2
+    n_track_pos_embeds: int = 512
     dropout: float = 0.0
-    bias: bool = True
+    bias: bool = False
 
     @property
     def n_embed_and_added(self):
@@ -43,7 +44,7 @@ class SelfAttention(nn.Module):
         self.value = nn.Linear(config.n_embeds, head_size, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
         self.register_buffer(
-            "tril", torch.tril(torch.ones(config.context_len, config.context_len))
+            "mask", torch.tril(torch.ones(config.context_len, config.context_len))
         )
 
     def forward(self, x):
@@ -57,7 +58,7 @@ class SelfAttention(nn.Module):
                 q, k, v, attn_mask=None, dropout_p=dropout, is_causal=True
             )
         w = q @ k.transpose(-2, -1) * C**-0.5
-        w = w.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        w = w.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
         w = self.dropout(w)
         return w @ v
@@ -230,23 +231,24 @@ class Model(nn.Module):
         self.position_embedding_table = nn.Embedding(
             config.context_len, config.n_embeds
         )
-        self.track_position_embedding_table = nn.Embedding(128, config.n_embeds)
+        self.track_position_embedding_table = nn.Embedding(
+            config.n_track_pos_embeds, config.n_embeds
+        )
         self.added_param_embed = nn.Linear(config.n_added_params, config.n_embeds)
         self.drop = nn.Dropout(config.dropout)
-        self.blocks = nn.Sequential(*[SABlock(config) for _ in range(config.n_layers)])
-        self.layer_norm = nn.LayerNorm(config.n_embed_and_added, bias=config.bias)
-        self.lm_head = nn.Linear(
-            config.n_embed_and_added, config.n_tokens_and_added, bias=False
+        self.attention = nn.Sequential(
+            *[SABlock(config) for _ in range(config.n_layers)]
         )
-        # Tie weights
+        self.layer_norm = nn.LayerNorm(config.n_embeds, bias=config.bias)
+        self.token_prediction = nn.Linear(config.n_embeds, config.n_tokens, bias=False)
+        self.added_prediction = nn.Linear(
+            config.n_embeds, config.n_added_params, bias=False
+        )
         tie_weights = torch.nn.Parameter(
-            self.lm_head.weight[: config.n_tokens, : config.n_embeds]
+            self.token_prediction.weight[: config.n_tokens, : config.n_embeds]
         )
         self.token_embedding_table.weight = tie_weights
         self.apply(self._init_weights)
-        # Scale the weights of residual layers at initialization by a factor of 1/√N
-        # where N is the number of residual layers.
-        # Language Models are Unsupervised Multitask Learners
         for name, p in self.named_parameters():
             if name.endswith("projection.weight"):
                 torch.nn.init.normal_(
@@ -262,7 +264,8 @@ class Model(nn.Module):
         added = inputs[:, :, 1 : 1 + self.config.n_added_params].view(
             B, T, self.config.n_added_params
         )
-        track_pos = inputs[:, :, -1].view(B, self.config.context_len).long()
+        track_pos = inputs[:, :, -1].view(B, T)
+        track_pos = (self.config.n_track_pos_embeds * track_pos).long()
         return tokens, added, track_pos
 
     def _init_weights(self, module):
@@ -278,6 +281,9 @@ class Model(nn.Module):
         B, T, C = x.shape
         assert T <= self.config.context_len, T
         tokens, added, track_pos = self._split_inputs(x)
+        # print(f"{tokens.shape=}")
+        # print(f"{added.shape=}")
+        # print(f"{track_pos.shape=}")
         arange = torch.arange(T, dtype=torch.long, device=device)
         tok_emb = self.token_embedding_table(tokens)
         pos_emb = self.position_embedding_table(arange)
@@ -285,8 +291,8 @@ class Model(nn.Module):
         added_emb = self.added_param_embed(added)
         x = tok_emb + pos_emb + added_emb + track_pos_emb
         x = self.drop(x)
-        x = self.blocks(x)
-        x = torch.cat((x, added), dim=2)
+        x = self.attention(x)
+        # x = torch.cat((x, added), dim=2)
         x = self.layer_norm(x)
         if targets is None:
             # only use last position for generation
@@ -298,10 +304,14 @@ class Model(nn.Module):
         B, T, C = token_logits.shape
         t_tokens, t_added, _ = self._split_inputs(targets)
         token_loss = F.cross_entropy(token_logits.view(B * T, C), t_tokens.view(B * T))
+        # added_param_loss = F.mse_loss(added_logits, t_added, reduction="sum")
+        # added_param_loss = F.l1_loss(added_logits, t_added)
         err = added_logits - t_added
+        err[:, :, 1] *= 10  # amplify the delta loss
         sq_err = err**2
         mse = sq_err.mean(dim=1).mean(dim=0)
         added_param_loss = mse.sum()
+        # added_param_loss = (err**2).mean()
         loss = token_loss + added_param_loss
         return ModelForward(
             token_logits, added_logits, loss, token_loss, added_param_loss
@@ -311,6 +321,9 @@ class Model(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         self.eval()
         out = []
+        for sample in idx[-1, :, : 1 + self.config.n_added_params].tolist():
+            out.append([int(sample[0])] + sample[1:])
+
         for i in track(range(max_new_tokens)):
             idx = idx[:, -self.config.context_len :]  # truncate context
             forward = self(idx)
@@ -325,6 +338,9 @@ class Model(nn.Module):
             added_params = forward.added_logits[:, -1, :]
             next_track_pos = torch.tensor([[i / max_new_tokens]]).to(idx.device)
             # print(f"{idx.shape=}")
+            # print(f"{next_token.shape=}")
+            # print(f"{added_params.shape=}")
+            # print(f"{next_track_pos.shape=}")
             next_idx = torch.cat((next_token, added_params, next_track_pos), dim=-1)
             # print(f"{next_idx.shape=}")
             out.append([token] + added_params.tolist()[0])
