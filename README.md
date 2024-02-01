@@ -26,6 +26,7 @@ Build a model capable of generating and endless piano sonata that's not obviousl
 
 | Version | Changes                                              |
 | ------: | ---------------------------------------------------- |
+|      10 | n_embeds 192 -> 384. bias -> False                   |
 |       9 | Embed size 64 -> 192. Combined multi head attention. |
 |       8 | Embed size 32 -> 64. ReLU -> GELU                    |
 
